@@ -179,6 +179,7 @@ def main():
         collate = TokenCountingCollator(collate)
     args = TrainingArguments(output_dir=a.output, per_device_train_batch_size=a.batch_size,
         gradient_accumulation_steps=a.grad_accum, num_train_epochs=a.epochs,
+        per_device_eval_batch_size=1, prediction_loss_only=True, eval_accumulation_steps=1,
         max_steps=a.max_steps, learning_rate=a.learning_rate, fp16=False, bf16=torch.cuda.is_bf16_supported(),
         gradient_checkpointing=True, gradient_checkpointing_kwargs={'use_reentrant': False},
         optim=selected_optimizer, logging_steps=1, save_steps=100, save_total_limit=2,
