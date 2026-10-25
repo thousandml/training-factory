@@ -30,7 +30,7 @@ def main():
     p.add_argument('--grad-accum', type=int, default=16)
     p.add_argument('--epochs', type=float, default=1)
     p.add_argument('--max-steps', type=int, default=-1)
-    p.add_argument('--learning-rate', type=float, default=2e-5)
+    p.add_argument('--learning-rate', type=float, default=2e-4)
     p.add_argument('--benchmark', action='store_true', help='Collect CUDA-synchronized optimizer-step timing and peak memory')
     p.add_argument('--benchmark-warmup-steps', type=int, default=10)
     p.add_argument('--comparison-logs', action='store_true', help='Log actual consumed tokens, throughput and loss history')
