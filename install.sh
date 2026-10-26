@@ -200,7 +200,7 @@ python - <<'PY'
 import torch
 import transformers
 from packaging.version import Version
-assert Version(transformers.__version__) == Version("5.17.0"), transformers.__version__
+assert Version(transformers.__version__) == Version("5.14.1"), transformers.__version__
 import peft
 import cq.cq_kernels
 import cq.runtime_ops
