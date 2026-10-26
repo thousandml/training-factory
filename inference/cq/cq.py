@@ -2307,6 +2307,10 @@ class CqConfig(QuantizationConfig):
         if self.manifest is not None:
             configure_cq_pipeline_partition(self.manifest)
 
+        # Install before Gemma4 model construction; maybe_update_config() is
+        # not guaranteed to run in every engine initialization path.
+        _install_cq_gemma4_vision_hook()
+
         # No MiMo constructor patch is required here. MTP-vs-backbone
         # ownership is enforced by the manifest namespace resolver.
 
