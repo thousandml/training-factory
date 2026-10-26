@@ -2170,6 +2170,16 @@ def main():
     )
     parser.add_argument("--model", required=True)
     parser.add_argument(
+        "--quantized-model-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the existing quantized CQ model directory containing "
+            "config.json and quantization_data/. If omitted, use the legacy "
+            "/mnt/d/quantized_models/<model-name>-CQ-4bit location."
+        ),
+    )
+    parser.add_argument(
         "--repo-id",
         required=True,
         help=(
@@ -2209,11 +2219,18 @@ def main():
     if args.upload_workers < 1:
         parser.error("--upload-workers must be >= 1")
 
-    cq_dir = Path(
-        f"/mnt/d/quantized_models/{args.model.rstrip('/').split('/')[-1]}-CQ-4bit"
-    ).resolve()
-    if not cq_dir.exists():
-        raise FileNotFoundError(cq_dir)
+    if args.quantized_model_dir is not None:
+        cq_dir = args.quantized_model_dir.expanduser().resolve()
+    else:
+        model_name = args.model.rstrip("/").split("/")[-1]
+        cq_dir = Path(f"/mnt/d/quantized_models/{model_name}-CQ-4bit").resolve()
+
+    if not cq_dir.is_dir():
+        parser.error(f"Quantized model directory does not exist: {cq_dir}")
+    if not (cq_dir / "config.json").is_file():
+        parser.error(f"Missing config.json in quantized model directory: {cq_dir}")
+    if not (cq_dir / QUANT_DIR_NAME).is_dir():
+        parser.error(f"Missing {QUANT_DIR_NAME}/ in quantized model directory: {cq_dir}")
 
     repo_id = args.repo_id.strip()
     if not repo_id or "/" not in repo_id:
