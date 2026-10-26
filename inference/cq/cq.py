@@ -2295,6 +2295,16 @@ def _install_cq_gemma4_vision_hook() -> None:
         return original_replace(module, quant_config, *args, **kwargs)
 
     _cq_gemma4_init._cq_vision_hook = True
+    if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
+        import multiprocessing
+
+        print(
+            "[CQ GEMMA4 HOOK INSTALL]",
+            "pid=", os.getpid(),
+            "process=", multiprocessing.current_process().name,
+            "class=", cls.__module__ + "." + cls.__name__,
+            flush=True,
+        )
     cls.__init__ = _cq_gemma4_init
     gemma4_mm.recursive_replace_linear = _cq_recursive_replace_linear
 
