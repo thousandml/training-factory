@@ -111,9 +111,18 @@ def cq_layer_name_to_runtime(
                 return "model." + rest
         return name
 
-    # Vision stays under the outer multimodal model.
-    if name.startswith("model.visual.") or name.startswith("visual."):
-        return name if name.startswith("model.") else "model." + name
+    # Vision stays under the outer multimodal model, never the language wrapper.
+    if name.startswith(("model.visual.", "model.vision_tower.")):
+        return name
+    if name.startswith(("visual.", "vision_tower.")):
+        return "model." + name
+    # Repair names emitted by older converter versions.
+    for bad in ("model.language_model.model.vision_tower.",
+                "model.language_model.vision_tower.",
+                "model.language_model.model.visual.",
+                "model.language_model.visual."):
+        if name.startswith(bad):
+            return ("model.vision_tower." if "vision_tower." in bad else "model.visual.") + name[len(bad):]
 
     # Already-normalized multimodal body.
     if name.startswith("model.language_model.model."):

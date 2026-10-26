@@ -540,6 +540,14 @@ class _CqExpertRef:
 def _cq_normalize_path(name: str) -> str:
     """Canonicalize equivalent HF/vLLM module paths for manifest lookup."""
     s = name.strip(".")
+    # Old converted multimodal manifests accidentally nested the vision tower
+    # inside language_model.model. Treat those aliases as vision records.
+    for vision in ("vision_tower.", "visual."):
+        for wrapper in ("model.language_model.model.", "model.language_model.",
+                        "language_model.model.", "language_model."):
+            if s.startswith(wrapper + vision):
+                s = "model." + s[len(wrapper):]
+                break
     for p in ("model.language_model.", "language_model.", "model."):
         if s.startswith(p):
             s = s[len(p):]
