@@ -2446,6 +2446,39 @@ class CqConfig(QuantizationConfig):
 
             packed = manifest.resolve_packed_linear(prefix)
 
+            # Handle fused QKV with CQ-compressed Q/K and a dense V.
+            if packed is None and prefix.endswith(".qkv_proj"):
+                base = prefix[:-len("qkv_proj")]
+                q_name = manifest.resolve_linear_name(base + "q_proj")
+                k_name = manifest.resolve_linear_name(base + "k_proj")
+                v_name = manifest.resolve_linear_name(base + "v_proj")
+
+                if q_name is not None and k_name is not None and v_name is None:
+                    if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
+                        print(
+                            "[CQ HYBRID QKV]",
+                            "runtime=", prefix,
+                            "cq_q=", q_name,
+                            "cq_k=", k_name,
+                            "dense_v=", base + "v_proj",
+                            flush=True,
+                        )
+                    return CqHybridQKVDenseVMethod(
+                        layer.input_size,
+                        layer.output_size,
+                        quant_config=self,
+                        prefixes=[q_name, k_name],
+                        runtime_prefix=prefix,
+                    )
+
+                if q_name is not None or k_name is not None or v_name is not None:
+                    raise RuntimeError(
+                        "CQ incomplete fused-QKV manifest for " + prefix + ": "
+                        f"q={q_name!r}, k={k_name!r}, v={v_name!r}. "
+                        "Only fully CQ Q/K/V or CQ Q/K with a real dense V "
+                        "checkpoint tensor are supported."
+                    )
+
             if packed is not None:
                 packed_kind, source_names = packed
 
@@ -2910,6 +2943,179 @@ class CqQKVMethod(_CqPackedLinearMethodBase):
         if bias is not None:
             out = out + bias
         return out
+
+
+class CqHybridQKVDenseVMethod(_CqPackedLinearMethodBase):
+    """Fused QKV backed by CQ Q/K and an actual dense V checkpoint."""
+
+    def __init__(
+        self,
+        input_size,
+        output_size,
+        quant_config,
+        prefixes,
+        runtime_prefix,
+    ):
+        self.quant_config = quant_config
+        self.q_prefix, self.k_prefix = prefixes
+        self.runtime_prefix = runtime_prefix
+
+        self.N = ((int(input_size) + 31) // 32) * 32
+        self.input_size = int(input_size)
+        self.output_size = int(output_size)
+
+        manifest = quant_config.manifest
+
+        self.q_M, q_N = _cq_record_matrix_shape(
+            manifest, self.q_prefix
+        )
+        self.k_M, k_N = _cq_record_matrix_shape(
+            manifest, self.k_prefix
+        )
+
+        self.v_M = self.output_size - self.q_M - self.k_M
+
+        if q_N != self.N or k_N != self.N or self.v_M <= 0:
+            raise RuntimeError(
+                f"CQ hybrid QKV geometry mismatch: {runtime_prefix}: "
+                f"q={(self.q_M, q_N)} "
+                f"k={(self.k_M, k_N)} "
+                f"runtime={(self.output_size, self.N)}"
+            )
+
+        self._init_runtime_for_slot("q", self.N, self.q_M)
+        self._init_runtime_for_slot("k", self.N, self.k_M)
+
+    def create_weights(
+        self,
+        layer,
+        input_size_per_partition,
+        output_partition_sizes,
+        input_size,
+        output_size,
+        params_dtype,
+        **extra_weight_attrs,
+    ):
+        _assert_cq_tp1(
+            input_size_per_partition=input_size_per_partition,
+            output_partition_sizes=output_partition_sizes,
+            input_size=input_size,
+            output_size=output_size,
+            prefix=self.runtime_prefix,
+        )
+
+        _register_cq_matrix(layer, "q", self.N, self.q_M)
+        _register_cq_matrix(layer, "k", self.N, self.k_M)
+
+        v_weight = Parameter(
+            torch.empty(
+                (self.v_M, self.input_size),
+                device=_cq_runtime_device(),
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+
+        set_weight_attrs(v_weight, {"ignore_warning": True})
+        layer.register_parameter("cq_dense_v_weight", v_weight)
+        layer._cq_hybrid_v_loaded = False
+
+        def _load_qkv(param, loaded_weight, *args, **kwargs):
+            shard_id = kwargs.get(
+                "shard_id",
+                args[0] if args else None,
+            )
+
+            if shard_id in ("q", "k"):
+                if loaded_weight.numel() != 0:
+                    raise RuntimeError(
+                        f"CQ hybrid {self.runtime_prefix}: "
+                        f"expected zero-sized CQ placeholder for "
+                        f"{shard_id!r}, got "
+                        f"{tuple(loaded_weight.shape)}"
+                    )
+                return
+
+            if shard_id != "v":
+                raise RuntimeError(
+                    f"CQ hybrid {self.runtime_prefix}: "
+                    f"unexpected QKV shard {shard_id!r}"
+                )
+
+            if tuple(loaded_weight.shape) != tuple(v_weight.shape):
+                raise RuntimeError(
+                    f"CQ hybrid {self.runtime_prefix}: "
+                    f"dense V checkpoint shape "
+                    f"{tuple(loaded_weight.shape)} does not match "
+                    f"expected {tuple(v_weight.shape)}. "
+                    "Missing V weights cannot be reconstructed."
+                )
+
+            with torch.no_grad():
+                v_weight.copy_(
+                    loaded_weight.to(
+                        device=v_weight.device,
+                        dtype=v_weight.dtype,
+                    )
+                )
+
+            layer._cq_hybrid_v_loaded = True
+
+        sink = Parameter(
+            torch.empty(
+                0,
+                device=_cq_runtime_device(),
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+
+        attrs = dict(extra_weight_attrs)
+        attrs.update({
+            "ignore_warning": True,
+            "weight_loader": _load_qkv,
+        })
+
+        set_weight_attrs(sink, attrs)
+        sink.weight_loader = _load_qkv
+        sink.ignore_warning = True
+        layer.register_parameter("weight", sink)
+
+    @torch.no_grad()
+    def process_weights_after_loading(self, layer):
+        if not getattr(layer, "_cq_hybrid_v_loaded", False):
+            raise RuntimeError(
+                f"CQ hybrid {self.runtime_prefix}: "
+                "dense V checkpoint shard was never loaded. "
+                "Cannot run with uninitialized V weights."
+            )
+
+        _copy_cq_record_into_named_slot(
+            layer,
+            self.quant_config.manifest,
+            self.q_prefix,
+            "q",
+        )
+
+        _copy_cq_record_into_named_slot(
+            layer,
+            self.quant_config.manifest,
+            self.k_prefix,
+            "k",
+        )
+
+    def apply(self, layer, input, bias=None):
+        q = self._apply_slot(
+            layer, input, "q", self.N, self.q_M
+        )
+        k = self._apply_slot(
+            layer, input, "k", self.N, self.k_M
+        )
+        v = F.linear(input, layer.cq_dense_v_weight)
+
+        out = torch.cat((q, k, v), dim=-1)
+
+        return out if bias is None else out + bias
 
 
 class CqConcatPackedMethod(_CqPackedLinearMethodBase):
