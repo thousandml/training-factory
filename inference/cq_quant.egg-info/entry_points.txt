@@ -1,2 +1,0 @@
-[vllm.general_plugins]
-register_cq = cq:register

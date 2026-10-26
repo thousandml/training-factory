@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: cq-quant
-Version: 0.4.1
-Requires-Python: >=3.12,<3.13
-Requires-Dist: vllm==0.27.1
-Requires-Dist: safetensors
-Requires-Dist: huggingface_hub
-Dynamic: requires-dist
-Dynamic: requires-python
