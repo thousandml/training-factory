@@ -2217,6 +2217,77 @@ class CqNgramEmbeddingMethod(QuantizeMethodBase):
         return self.embedding(layer, input_)
 
 
+# ---------------------------------------------------------------------------
+# Gemma 4 vision-tower CQ integration (vLLM 0.27.1)
+# ---------------------------------------------------------------------------
+# Gemma4ForConditionalGeneration sets tower_quant=None for methods not in its
+# allowlist when vision dimensions are not multiples of 64. CQ supports the
+# checkpoint's non-64-aligned 4304-wide vision matrices, so restore CQ only
+# for the vision-tower recursive replacement call. No vLLM file is edited.
+_CQ_GEMMA4_TOWER_CONTEXT = threading.local()
+
+
+def _install_cq_gemma4_vision_hook() -> None:
+    try:
+        from vllm.model_executor.models import gemma4_mm
+    except ImportError:
+        return
+
+    cls = getattr(gemma4_mm, "Gemma4ForConditionalGeneration", None)
+    replace = getattr(gemma4_mm, "recursive_replace_linear", None)
+    if cls is None or replace is None:
+        return
+    if getattr(cls.__init__, "_cq_vision_hook", False):
+        return
+
+    original_init = cls.__init__
+    original_replace = replace
+
+    def _cq_gemma4_init(self, *args, **kwargs):
+        config = kwargs.get("vllm_config", args[0] if args else None)
+        cq_config = getattr(config, "quant_config", None)
+        if not (
+            cq_config is not None
+            and getattr(cq_config, "get_name", lambda: None)() == "cq"
+        ):
+            return original_init(self, *args, **kwargs)
+
+        previous = getattr(_CQ_GEMMA4_TOWER_CONTEXT, "config", None)
+        _CQ_GEMMA4_TOWER_CONTEXT.config = cq_config
+        try:
+            return original_init(self, *args, **kwargs)
+        finally:
+            _CQ_GEMMA4_TOWER_CONTEXT.config = previous
+
+    def _cq_recursive_replace_linear(module, quant_config, *args, **kwargs):
+        prefix = kwargs.get("prefix", "")
+        if not prefix and args:
+            prefix = args[0]
+        cq_config = getattr(_CQ_GEMMA4_TOWER_CONTEXT, "config", None)
+        if (
+            quant_config is None
+            and cq_config is not None
+            and str(prefix).rstrip(".").endswith("vision_tower")
+        ):
+            manifest = getattr(cq_config, "manifest", None)
+            if manifest is None or not any(
+                "vision_tower." in name for name in manifest.quantized_layers
+            ):
+                raise RuntimeError(
+                    "CQ: Gemma4 vision tower has zero-weight placeholders "
+                    "but no vision-tower records in the CQ manifest"
+                )
+            quant_config = cq_config
+            if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
+                print("[CQ GEMMA4 VISION OVERRIDE]", "prefix=", prefix,
+                      "quant_config=cq", flush=True)
+        return original_replace(module, quant_config, *args, **kwargs)
+
+    _cq_gemma4_init._cq_vision_hook = True
+    cls.__init__ = _cq_gemma4_init
+    gemma4_mm.recursive_replace_linear = _cq_recursive_replace_linear
+
+
 @register_quantization_config("cq")
 class CqConfig(QuantizationConfig):
 
@@ -2290,6 +2361,9 @@ class CqConfig(QuantizationConfig):
 
         # Install the memory-aware vLLM PP split before model construction.
         configure_cq_pipeline_partition(self.manifest)
+        # vLLM's Gemma4 tower allowlist excludes CQ for non-64-aligned
+        # vision dimensions. Install a CQ-only constructor-time hook.
+        _install_cq_gemma4_vision_hook()
 
     def get_quant_method(
         self,
