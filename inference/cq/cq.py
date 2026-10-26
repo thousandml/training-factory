@@ -2243,16 +2243,8 @@ def _install_cq_gemma4_vision_hook() -> None:
     original_init = cls.__init__
     original_replace = replace
 
-    def _cq_gemma4_init(self, *args, **kwargs):
-        if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
-            print(
-                "[CQ GEMMA4 INIT ARGS]",
-                "args_count=", len(args),
-                "kwargs_keys=", list(kwargs.keys()),
-                "self_type=", type(self).__name__,
-                flush=True,
-            )
-        config = kwargs.get("vllm_config", args[0] if args else None)
+    def _cq_gemma4_init(self, *, vllm_config, prefix=""):
+        config = vllm_config
         cq_config = getattr(config, "quant_config", None)
         if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
             print(
@@ -2269,12 +2261,12 @@ def _install_cq_gemma4_vision_hook() -> None:
             cq_config is not None
             and getattr(cq_config, "get_name", lambda: None)() == "cq"
         ):
-            return original_init(self, *args, **kwargs)
+            return original_init(self, vllm_config=vllm_config, prefix=prefix)
 
         previous = getattr(_CQ_GEMMA4_TOWER_CONTEXT, "config", None)
         _CQ_GEMMA4_TOWER_CONTEXT.config = cq_config
         try:
-            return original_init(self, *args, **kwargs)
+            return original_init(self, vllm_config=vllm_config, prefix=prefix)
         finally:
             _CQ_GEMMA4_TOWER_CONTEXT.config = previous
 
@@ -2403,23 +2395,6 @@ class CqConfig(QuantizationConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> QuantizeMethodBase | None:
-
-
-        if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
-            from vllm.model_executor.models import gemma4_mm
-
-            print(
-                "[CQ ENGINE HOOK STATUS]",
-                "pid=", os.getpid(),
-                "prefix=", prefix,
-                "patched=",
-                getattr(
-                    gemma4_mm.Gemma4ForConditionalGeneration.__init__,
-                    "_cq_vision_hook",
-                    False,
-                ),
-                flush=True,
-            )
 
         manifest = self.manifest
 
