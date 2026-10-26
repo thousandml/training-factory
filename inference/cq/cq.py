@@ -2246,6 +2246,17 @@ def _install_cq_gemma4_vision_hook() -> None:
     def _cq_gemma4_init(self, *args, **kwargs):
         config = kwargs.get("vllm_config", args[0] if args else None)
         cq_config = getattr(config, "quant_config", None)
+        if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
+            print(
+                "[CQ GEMMA4 INIT]",
+                "vllm_config_type=", type(config).__name__,
+                "quant_config_type=", type(cq_config).__name__,
+                "quant_config_name=",
+                getattr(cq_config, "get_name", lambda: None)(),
+                "manifest_loaded=",
+                getattr(cq_config, "manifest", None) is not None,
+                flush=True,
+            )
         if not (
             cq_config is not None
             and getattr(cq_config, "get_name", lambda: None)() == "cq"
