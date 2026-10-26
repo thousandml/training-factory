@@ -2244,6 +2244,14 @@ def _install_cq_gemma4_vision_hook() -> None:
     original_replace = replace
 
     def _cq_gemma4_init(self, *args, **kwargs):
+        if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
+            print(
+                "[CQ GEMMA4 INIT ARGS]",
+                "args_count=", len(args),
+                "kwargs_keys=", list(kwargs.keys()),
+                "self_type=", type(self).__name__,
+                flush=True,
+            )
         config = kwargs.get("vllm_config", args[0] if args else None)
         cq_config = getattr(config, "quant_config", None)
         if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
