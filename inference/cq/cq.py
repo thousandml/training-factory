@@ -2396,6 +2396,23 @@ class CqConfig(QuantizationConfig):
         prefix: str,
     ) -> QuantizeMethodBase | None:
 
+
+        if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
+            from vllm.model_executor.models import gemma4_mm
+
+            print(
+                "[CQ ENGINE HOOK STATUS]",
+                "pid=", os.getpid(),
+                "prefix=", prefix,
+                "patched=",
+                getattr(
+                    gemma4_mm.Gemma4ForConditionalGeneration.__init__,
+                    "_cq_vision_hook",
+                    False,
+                ),
+                flush=True,
+            )
+
         manifest = self.manifest
 
         if manifest is None:
