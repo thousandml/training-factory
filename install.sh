@@ -186,7 +186,7 @@ python -m pip install "typeguard>=4.0"
 # Reassert the CQ-compatible Transformers version.
 
 # python -m pip install --no-deps "transformers==5.17.0"
-python -m pip install --no-deps "transformers==5.14.1"
+python -m pip install "transformers==5.14.1"
 
 python -m pip install rouge-score sacrebleu
 
