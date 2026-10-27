@@ -2383,10 +2383,10 @@ class CQModelWrapper(nn.Module):
             with open(original_config_path, "r", encoding="utf-8") as f:
                 original_cfg = json.load(f)
             qcfg = original_cfg.setdefault("quantization_config", {})
-            qcfg["quant_method"] = "cq_quant"
+            qcfg["quant_method"] = "cq"
             qcfg["cq_layout"] = "native_vllm"
             original_cfg["_name_or_path"] = (
-                original_cfg.get("_name_or_path") or model_name
+                model_name
             )
             save_dir = pathlib.Path(save_path)
             save_dir.mkdir(parents=True, exist_ok=True)
@@ -2903,7 +2903,7 @@ class CQModelWrapper(nn.Module):
         if not (save_path / "config.json").exists():
             cfg_dict = _hf_config_to_dict(self.model.config)
             qcfg = cfg_dict.setdefault("quantization_config", {})
-            qcfg["quant_method"] = "cq_quant"
+            qcfg["quant_method"] = "cq"
             qcfg["cq_layout"] = "native_vllm"
             with open(save_path / "config.json", "w") as f:
                 json.dump(cfg_dict, f, indent=2)
