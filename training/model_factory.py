@@ -46,4 +46,11 @@ def _has_multimodal_config(config):
     return any(getattr(config, key, None) is not None for key in ('vision_config', 'audio_config', 'visual_config'))
 
 def _has_multimodal_tower(model):
-    return any(any(token in name.lower().split('.') for token in ('visual', 'vision', 'vision_model', 'audio', 'audio_tower', 'audio_model')) for name, _ in model.named_modules())
+    tower_names = {
+        'visual', 'vision', 'vision_model', 'vision_tower',
+        'audio', 'audio_tower', 'audio_model',
+    }
+    return any(
+        any(part in tower_names for part in name.lower().split('.'))
+        for name, _ in model.named_modules()
+    )
