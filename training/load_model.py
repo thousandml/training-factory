@@ -6,6 +6,7 @@ from safetensors import safe_open
 from cq_linear import CQLinear, CQOutputSlice
 from model_factory import causal_lm_skeleton
 from checkpoint_layout import plan_records
+from text_only_layout import text_only_index
 from residual_names import resolve_residual
 from residual_placeholders import is_cq_placeholder
 
@@ -25,7 +26,7 @@ def load_model(path, mapping_path=None, trust_remote_code=False, *, text_only=Fa
     model, cfg = causal_lm_skeleton(root, trust_remote_code=trust_remote_code, text_only=text_only)
     linears = {name: [module.out_features, module.in_features]
                for name, module in model.named_modules() if isinstance(module, torch.nn.Linear)}
-    plans = plan_records(index, linears, mapping, skip_unmodeled_auxiliary=text_only)
+    plans = plan_records(text_only_index(index, linears, text_only=text_only), linears, mapping, skip_unmodeled_auxiliary=text_only)
     destinations = set()
     for plan in plans:
         record_name = plan['record']

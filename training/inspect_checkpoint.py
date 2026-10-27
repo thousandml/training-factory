@@ -6,6 +6,7 @@ from safetensors import safe_open
 import torch
 from model_factory import causal_lm_skeleton
 from checkpoint_layout import plan_records
+from text_only_layout import text_only_index
 from residual_names import resolve_residual
 from residual_placeholders import is_cq_placeholder
 
@@ -21,7 +22,7 @@ def inspect(path, mapping_path=None, *, text_only=False, trust_remote_code=False
     model, cfg = causal_lm_skeleton(root, text_only=text_only, trust_remote_code=trust_remote_code)
     linears = {n: [m.out_features,m.in_features] for n,m in model.named_modules() if isinstance(m,torch.nn.Linear)}
     mapping = json.loads(Path(mapping_path).read_text()) if mapping_path else {}
-    plans = plan_records(index,linears,mapping, skip_unmodeled_auxiliary=text_only)
+    plans = plan_records(text_only_index(index, linears, text_only=text_only),linears,mapping, skip_unmodeled_auxiliary=text_only)
     quantized = {n for p in plans for n in p['destinations']}
     for plan in plans:
         loc = index['layers'][plan['record']]

@@ -61,9 +61,12 @@ def main():
     configure_backend(a.kernel_module, a.kernel_backend)
     model = load_model(a.model, a.layer_map, a.trust_remote_code, text_only=a.text_only)
     targets = a.targets.split(',')
-    matched = [n for n, m in model.named_modules() if isinstance(m, torch.nn.Linear) and n.split('.')[-1] in targets]
+    from cq_linear import CQLinear, CQOutputSlice
+    matched = [n for n, m in model.named_modules()
+               if isinstance(m, (torch.nn.Linear, CQLinear, CQOutputSlice))
+               and n.split('.')[-1] in targets]
     if not matched:
-        raise ValueError('No target linears matched')
+        raise ValueError(f'No LoRA targets matched {targets}; verify the Gemma 4 projection names')
     config = LoraConfig(task_type='CAUSAL_LM', r=a.rank, lora_alpha=a.alpha,
                         lora_dropout=a.lora_dropout, target_modules=matched, bias='none',
                         base_model_name_or_path=str(Path(a.model).resolve()))
