@@ -5,7 +5,7 @@ Gemma 4 `model.vision_tower.*` record as backbone.
 """
 
 _AUX_SEGMENTS = {
-    "vision": {"vision_tower", "vision_model", "vision_encoder", "visual", "vision"},
+    "vision": {"vision_tower", "vision_model", "vision_encoder", "visual", "vision", "embed_vision", "vision_projector", "multi_modal_projector"},
     "audio": {"audio_tower", "audio_model", "audio_encoder", "audio"},
     "mtp": {"mtp", "mtp_head", "multi_token_prediction"},
 }
