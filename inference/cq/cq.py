@@ -540,14 +540,6 @@ class _CqExpertRef:
 def _cq_normalize_path(name: str) -> str:
     """Canonicalize equivalent HF/vLLM module paths for manifest lookup."""
     s = name.strip(".")
-    # Old converted multimodal manifests accidentally nested the vision tower
-    # inside language_model.model. Treat those aliases as vision records.
-    for vision in ("vision_tower.", "visual."):
-        for wrapper in ("model.language_model.model.", "model.language_model.",
-                        "language_model.model.", "language_model."):
-            if s.startswith(wrapper + vision):
-                s = "model." + s[len(wrapper):]
-                break
     for p in ("model.language_model.", "language_model.", "model."):
         if s.startswith(p):
             s = s[len(p):]
@@ -2217,98 +2209,6 @@ class CqNgramEmbeddingMethod(QuantizeMethodBase):
         return self.embedding(layer, input_)
 
 
-# ---------------------------------------------------------------------------
-# Gemma 4 vision-tower CQ integration (vLLM 0.27.1)
-# ---------------------------------------------------------------------------
-# Gemma4ForConditionalGeneration sets tower_quant=None for methods not in its
-# allowlist when vision dimensions are not multiples of 64. CQ supports the
-# checkpoint's non-64-aligned 4304-wide vision matrices, so restore CQ only
-# for the vision-tower recursive replacement call. No vLLM file is edited.
-_CQ_GEMMA4_TOWER_CONTEXT = threading.local()
-
-
-def _install_cq_gemma4_vision_hook() -> None:
-    try:
-        from vllm.model_executor.models import gemma4_mm
-    except ImportError:
-        return
-
-    cls = getattr(gemma4_mm, "Gemma4ForConditionalGeneration", None)
-    replace = getattr(gemma4_mm, "recursive_replace_linear", None)
-    if cls is None or replace is None:
-        return
-    if getattr(cls.__init__, "_cq_vision_hook", False):
-        return
-
-    original_init = cls.__init__
-    original_replace = replace
-
-    def _cq_gemma4_init(self, *, vllm_config, prefix=""):
-        config = vllm_config
-        cq_config = getattr(config, "quant_config", None)
-        if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
-            print(
-                "[CQ GEMMA4 INIT]",
-                "vllm_config_type=", type(config).__name__,
-                "quant_config_type=", type(cq_config).__name__,
-                "quant_config_name=",
-                getattr(cq_config, "get_name", lambda: None)(),
-                "manifest_loaded=",
-                getattr(cq_config, "manifest", None) is not None,
-                flush=True,
-            )
-        if not (
-            cq_config is not None
-            and getattr(cq_config, "get_name", lambda: None)() == "cq"
-        ):
-            return original_init(self, vllm_config=vllm_config, prefix=prefix)
-
-        previous = getattr(_CQ_GEMMA4_TOWER_CONTEXT, "config", None)
-        _CQ_GEMMA4_TOWER_CONTEXT.config = cq_config
-        try:
-            return original_init(self, vllm_config=vllm_config, prefix=prefix)
-        finally:
-            _CQ_GEMMA4_TOWER_CONTEXT.config = previous
-
-    def _cq_recursive_replace_linear(module, quant_config, *args, **kwargs):
-        prefix = kwargs.get("prefix", "")
-        if not prefix and args:
-            prefix = args[0]
-        cq_config = getattr(_CQ_GEMMA4_TOWER_CONTEXT, "config", None)
-        if (
-            quant_config is None
-            and cq_config is not None
-            and str(prefix).rstrip(".").endswith("vision_tower")
-        ):
-            manifest = getattr(cq_config, "manifest", None)
-            if manifest is None or not any(
-                "vision_tower." in name for name in manifest.quantized_layers
-            ):
-                raise RuntimeError(
-                    "CQ: Gemma4 vision tower has zero-weight placeholders "
-                    "but no vision-tower records in the CQ manifest"
-                )
-            quant_config = cq_config
-            if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
-                print("[CQ GEMMA4 VISION OVERRIDE]", "prefix=", prefix,
-                      "quant_config=cq", flush=True)
-        return original_replace(module, quant_config, *args, **kwargs)
-
-    _cq_gemma4_init._cq_vision_hook = True
-    if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
-        import multiprocessing
-
-        print(
-            "[CQ GEMMA4 HOOK INSTALL]",
-            "pid=", os.getpid(),
-            "process=", multiprocessing.current_process().name,
-            "class=", cls.__module__ + "." + cls.__name__,
-            flush=True,
-        )
-    cls.__init__ = _cq_gemma4_init
-    gemma4_mm.recursive_replace_linear = _cq_recursive_replace_linear
-
-
 @register_quantization_config("cq")
 class CqConfig(QuantizationConfig):
 
@@ -2327,10 +2227,6 @@ class CqConfig(QuantizationConfig):
 
         if self.manifest is not None:
             configure_cq_pipeline_partition(self.manifest)
-
-        # Install before Gemma4 model construction; maybe_update_config() is
-        # not guaranteed to run in every engine initialization path.
-        _install_cq_gemma4_vision_hook()
 
         # No MiMo constructor patch is required here. MTP-vs-backbone
         # ownership is enforced by the manifest namespace resolver.
@@ -2386,9 +2282,6 @@ class CqConfig(QuantizationConfig):
 
         # Install the memory-aware vLLM PP split before model construction.
         configure_cq_pipeline_partition(self.manifest)
-        # vLLM's Gemma4 tower allowlist excludes CQ for non-64-aligned
-        # vision dimensions. Install a CQ-only constructor-time hook.
-        _install_cq_gemma4_vision_hook()
 
     def get_quant_method(
         self,
@@ -2445,50 +2338,6 @@ class CqConfig(QuantizationConfig):
             # --------------------------------------------------------
 
             packed = manifest.resolve_packed_linear(prefix)
-
-            # Gemma 4 full-attention blocks use K == V.
-            # The CQ manifest stores Q and K, but no independent V.
-            if packed is None and prefix.endswith(".qkv_proj"):
-                base = prefix[:-len("qkv_proj")]
-                q_name = manifest.resolve_linear_name(base + "q_proj")
-                k_name = manifest.resolve_linear_name(base + "k_proj")
-                v_name = manifest.resolve_linear_name(base + "v_proj")
-
-                if q_name is not None and k_name is not None and v_name is None:
-                    hf_config = getattr(manifest, "hf_config", {})
-                    text_config = hf_config.get("text_config", hf_config)
-
-                    if not (
-                        hf_config.get("model_type") == "gemma4"
-                        and text_config.get("attention_k_eq_v") is True
-                    ):
-                        raise RuntimeError(
-                            f"CQ Q/K-only fused QKV {prefix!r} requires "
-                            "Gemma 4 with attention_k_eq_v=true."
-                        )
-
-                    if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
-                        print(
-                            "[CQ SHARED KV QKV]",
-                            "runtime=", prefix,
-                            "cq_q=", q_name,
-                            "cq_kv=", k_name,
-                            flush=True,
-                        )
-
-                    return CqSharedKVQKVMethod(
-                        layer.input_size,
-                        layer.output_size,
-                        quant_config=self,
-                        prefixes=[q_name, k_name],
-                        runtime_prefix=prefix,
-                    )
-
-                if q_name is not None or k_name is not None or v_name is not None:
-                    raise RuntimeError(
-                        f"CQ incomplete fused-QKV manifest for {prefix}: "
-                        f"q={q_name!r}, k={k_name!r}, v={v_name!r}"
-                    )
 
             if packed is not None:
                 packed_kind, source_names = packed
@@ -2954,120 +2803,6 @@ class CqQKVMethod(_CqPackedLinearMethodBase):
         if bias is not None:
             out = out + bias
         return out
-
-
-
-class CqSharedKVQKVMethod(_CqPackedLinearMethodBase):
-    """Gemma 4 full-attention QKV: CQ Q and K, with V equal to K."""
-
-    def __init__(
-        self,
-        input_size,
-        output_size,
-        quant_config,
-        prefixes,
-        runtime_prefix,
-    ):
-        self.quant_config = quant_config
-        self.q_prefix, self.k_prefix = prefixes
-        self.runtime_prefix = runtime_prefix
-
-        self.N = ((int(input_size) + 31) // 32) * 32
-        self.output_size = int(output_size)
-
-        manifest = quant_config.manifest
-
-        self.q_M, q_N = _cq_record_matrix_shape(
-            manifest, self.q_prefix
-        )
-        self.k_M, k_N = _cq_record_matrix_shape(
-            manifest, self.k_prefix
-        )
-
-        self.v_M = self.k_M
-
-        if (
-            q_N != self.N
-            or k_N != self.N
-            or self.q_M + 2 * self.k_M != self.output_size
-        ):
-            raise RuntimeError(
-                f"CQ shared-K/V geometry mismatch for {runtime_prefix}: "
-                f"q={(self.q_M, q_N)}, "
-                f"k={(self.k_M, k_N)}, "
-                f"runtime output={self.output_size}, "
-                f"padded input={self.N}"
-            )
-
-        self._init_runtime_for_slot(
-            "q", self.N, self.q_M
-        )
-        self._init_runtime_for_slot(
-            "k", self.N, self.k_M
-        )
-
-    def create_weights(
-        self,
-        layer,
-        input_size_per_partition,
-        output_partition_sizes,
-        input_size,
-        output_size,
-        params_dtype,
-        **extra_weight_attrs,
-    ):
-        _assert_cq_tp1(
-            input_size_per_partition=input_size_per_partition,
-            output_partition_sizes=output_partition_sizes,
-            input_size=input_size,
-            output_size=output_size,
-            prefix=self.runtime_prefix,
-        )
-
-        _register_cq_matrix(
-            layer, "q", self.N, self.q_M
-        )
-        _register_cq_matrix(
-            layer, "k", self.N, self.k_M
-        )
-
-        # CQ owns the actual Q and K weights.
-        # HF residual weights are zero-sized placeholders.
-        # Gemma 4 has no separate V projection here.
-        _register_hf_weight_sink(
-            layer, extra_weight_attrs
-        )
-
-    @torch.no_grad()
-    def process_weights_after_loading(self, layer):
-        _copy_cq_record_into_named_slot(
-            layer,
-            self.quant_config.manifest,
-            self.q_prefix,
-            "q",
-        )
-
-        _copy_cq_record_into_named_slot(
-            layer,
-            self.quant_config.manifest,
-            self.k_prefix,
-            "k",
-        )
-
-    def apply(self, layer, input, bias=None):
-        q = self._apply_slot(
-            layer, input, "q", self.N, self.q_M
-        )
-
-        k = self._apply_slot(
-            layer, input, "k", self.N, self.k_M
-        )
-
-        # attention_k_eq_v: K and V share the projection.
-        out = torch.cat((q, k, k), dim=-1)
-
-        return out if bias is None else out + bias
-
 
 
 class CqConcatPackedMethod(_CqPackedLinearMethodBase):
@@ -4557,13 +4292,8 @@ def _install_cq_dynamo_dense_shims() -> None:
     globals()["_cq_mimo_deinterleave_traceable"] = ns["_cq_mimo_deinterleave_traceable"]
     CqLinearMethod.apply = ns["_cq_linear_apply"]
     CqQKVMethod.apply = ns["_cq_qkv_apply"]
-    CqSharedKVQKVMethod.apply = ns["_cq_shared_kv_qkv_apply"]
     CqGateUpMethod.apply = ns["_cq_gate_up_apply"]
 
-_CQ_DYNAMO_SHIM_SOURCE = 'def _cq_apply_matrix_traceable(input, packed_all, u_W, std_W, DL, DR,\n                               use_cufftdx_N, use_cufftdx_M, N, M, bias=None):\n    in_dtype = input.dtype\n    in_shape = input.shape\n    x_in = input.reshape(-1, input.shape[-1]).to(torch.float16)\n    x, input_sum = torch.ops.my_qlinear.forward_fft(x_in, N, DL, use_cufftdx_N)\n    x = x.contiguous()\n    x = torch.ops.my_qlinear.forward_pass(packed_all, x, N, M)\n    x = torch.ops.my_qlinear.reverse_ifft(x, DR, std_W, input_sum, u_W, bias, use_cufftdx_M)\n    x = x.reshape(*in_shape[:-1], M)\n    return x.to(in_dtype)\n\ndef _cq_mimo_deinterleave_traceable(y, spec):\n    n_kv = int(spec["num_kv_heads"])\n    qpg = int(spec["q_rows_per_group"])\n    hd = int(spec["head_dim"])\n    vhd = int(spec["v_head_dim"])\n    rpg = int(spec["rows_per_group"])\n    leading = y.shape[:-1]\n    g = y.reshape(*leading, n_kv, rpg)\n    q = g[..., :, :qpg].reshape(*leading, n_kv * qpg)\n    k = g[..., :, qpg:qpg + hd].reshape(*leading, n_kv * hd)\n    v = g[..., :, qpg + hd:qpg + hd + vhd].reshape(*leading, n_kv * vhd)\n    return torch.cat((q, k, v), dim=-1)\n\ndef _cq_linear_apply(self, layer, input, bias=None):\n    out = _cq_apply_matrix_traceable(input, layer.packed_all, layer.u_W, layer.std_W,\n        self.DL, self.DR, self.use_cufftdx_N, self.use_cufftdx_M, self.N, self.M, bias)\n    spec = self._mimo_qkv_spec\n    if spec is not None:\n        out = _cq_mimo_deinterleave_traceable(out, spec)\n    return out\n\ndef _cq_qkv_apply(self, layer, input, bias=None):\n    q = _cq_apply_matrix_traceable(input, layer.cq_q_packed_all, layer.cq_q_u, layer.cq_q_std,\n        self._q_DL, self._q_DR, self._q_use_cufftdx_N, self._q_use_cufftdx_M, self.N, self.q_M, None)\n    k = _cq_apply_matrix_traceable(input, layer.cq_k_packed_all, layer.cq_k_u, layer.cq_k_std,\n        self._k_DL, self._k_DR, self._k_use_cufftdx_N, self._k_use_cufftdx_M, self.N, self.k_M, None)\n    v = _cq_apply_matrix_traceable(input, layer.cq_v_packed_all, layer.cq_v_u, layer.cq_v_std,\n        self._v_DL, self._v_DR, self._v_use_cufftdx_N, self._v_use_cufftdx_M, self.N, self.v_M, None)\n    out = torch.cat((q, k, v), dim=-1)\n    if bias is not None:\n        out = out + bias\n    return out\n\ndef _cq_gate_up_apply(self, layer, input, bias=None):\n    gate = _cq_apply_matrix_traceable(input, layer.cq_gate_packed_all, layer.cq_gate_u, layer.cq_gate_std,\n        self._gate_DL, self._gate_DR, self._gate_use_cufftdx_N, self._gate_use_cufftdx_M, self.N, self.gate_M, None)\n    up = _cq_apply_matrix_traceable(input, layer.cq_up_packed_all, layer.cq_up_u, layer.cq_up_std,\n        self._up_DL, self._up_DR, self._up_use_cufftdx_N, self._up_use_cufftdx_M, self.N, self.up_M, None)\n    out = torch.cat((gate, up), dim=-1)\n    if bias is not None:\n        out = out + bias\n    return out\n\n\ndef _cq_shared_kv_qkv_apply(self, layer, input, bias=None):\n    q = _cq_apply_matrix_traceable(\n        input,\n        layer.cq_q_packed_all,\n        layer.cq_q_u,\n        layer.cq_q_std,\n        self._q_DL,\n        self._q_DR,\n        self._q_use_cufftdx_N,\n        self._q_use_cufftdx_M,\n        self.N,\n        self.q_M,\n        None,\n    )\n\n    k = _cq_apply_matrix_traceable(\n        input,\n        layer.cq_k_packed_all,\n        layer.cq_k_u,\n        layer.cq_k_std,\n        self._k_DL,\n        self._k_DR,\n        self._k_use_cufftdx_N,\n        self._k_use_cufftdx_M,\n        self.N,\n        self.k_M,\n        None,\n    )\n\n    out = torch.cat((q, k, k), dim=-1)\n\n    if bias is not None:\n        out = out + bias\n\n    return out\n'
+_CQ_DYNAMO_SHIM_SOURCE = 'def _cq_apply_matrix_traceable(input, packed_all, u_W, std_W, DL, DR,\n                               use_cufftdx_N, use_cufftdx_M, N, M, bias=None):\n    in_dtype = input.dtype\n    in_shape = input.shape\n    x_in = input.reshape(-1, input.shape[-1]).to(torch.float16)\n    x, input_sum = torch.ops.my_qlinear.forward_fft(x_in, N, DL, use_cufftdx_N)\n    x = x.contiguous()\n    x = torch.ops.my_qlinear.forward_pass(packed_all, x, N, M)\n    x = torch.ops.my_qlinear.reverse_ifft(x, DR, std_W, input_sum, u_W, bias, use_cufftdx_M)\n    x = x.reshape(*in_shape[:-1], M)\n    return x.to(in_dtype)\n\ndef _cq_mimo_deinterleave_traceable(y, spec):\n    n_kv = int(spec["num_kv_heads"])\n    qpg = int(spec["q_rows_per_group"])\n    hd = int(spec["head_dim"])\n    vhd = int(spec["v_head_dim"])\n    rpg = int(spec["rows_per_group"])\n    leading = y.shape[:-1]\n    g = y.reshape(*leading, n_kv, rpg)\n    q = g[..., :, :qpg].reshape(*leading, n_kv * qpg)\n    k = g[..., :, qpg:qpg + hd].reshape(*leading, n_kv * hd)\n    v = g[..., :, qpg + hd:qpg + hd + vhd].reshape(*leading, n_kv * vhd)\n    return torch.cat((q, k, v), dim=-1)\n\ndef _cq_linear_apply(self, layer, input, bias=None):\n    out = _cq_apply_matrix_traceable(input, layer.packed_all, layer.u_W, layer.std_W,\n        self.DL, self.DR, self.use_cufftdx_N, self.use_cufftdx_M, self.N, self.M, bias)\n    spec = self._mimo_qkv_spec\n    if spec is not None:\n        out = _cq_mimo_deinterleave_traceable(out, spec)\n    return out\n\ndef _cq_qkv_apply(self, layer, input, bias=None):\n    q = _cq_apply_matrix_traceable(input, layer.cq_q_packed_all, layer.cq_q_u, layer.cq_q_std,\n        self._q_DL, self._q_DR, self._q_use_cufftdx_N, self._q_use_cufftdx_M, self.N, self.q_M, None)\n    k = _cq_apply_matrix_traceable(input, layer.cq_k_packed_all, layer.cq_k_u, layer.cq_k_std,\n        self._k_DL, self._k_DR, self._k_use_cufftdx_N, self._k_use_cufftdx_M, self.N, self.k_M, None)\n    v = _cq_apply_matrix_traceable(input, layer.cq_v_packed_all, layer.cq_v_u, layer.cq_v_std,\n        self._v_DL, self._v_DR, self._v_use_cufftdx_N, self._v_use_cufftdx_M, self.N, self.v_M, None)\n    out = torch.cat((q, k, v), dim=-1)\n    if bias is not None:\n        out = out + bias\n    return out\n\ndef _cq_gate_up_apply(self, layer, input, bias=None):\n    gate = _cq_apply_matrix_traceable(input, layer.cq_gate_packed_all, layer.cq_gate_u, layer.cq_gate_std,\n        self._gate_DL, self._gate_DR, self._gate_use_cufftdx_N, self._gate_use_cufftdx_M, self.N, self.gate_M, None)\n    up = _cq_apply_matrix_traceable(input, layer.cq_up_packed_all, layer.cq_up_u, layer.cq_up_std,\n        self._up_DL, self._up_DR, self._up_use_cufftdx_N, self._up_use_cufftdx_M, self.N, self.up_M, None)\n    out = torch.cat((gate, up), dim=-1)\n    if bias is not None:\n        out = out + bias\n    return out\n'
 
 _install_cq_dynamo_dense_shims()
-
-# Install Gemma 4 CQ integration in each Python process that imports
-# this adapter, including vLLM's separately spawned EngineCore.
-_install_cq_gemma4_vision_hook()
