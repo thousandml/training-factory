@@ -67,25 +67,26 @@ def main():
                and n.split('.')[-1] in targets]
     if not matched:
         raise ValueError(f'No LoRA targets matched {targets}; verify the Gemma 4 projection names')
-    # The flat-packed CUDA kernel accepts nonaligned dimensions, but parity
-    # against decode_weight alone does not establish parity with the CQ forward
-    # transform. In particular, the polar block permutation may cross logical
-    # matrix rows, so the existing unswizzle(gs) is not a valid adjoint.
+    # Require a padded-layout tiled VJP for nonaligned CQ matrices.
+    # Older binaries returned [L,N] and are unsafe; the operator contract
+    # is checked by a dedicated CUDA parity/preflight script before training.
     from kernel_backend import packed_backward_available
     incompatible = [(name, module.cq_n, module.out_features, tuple(module.packed_all.shape))
                     for name, module in model.named_modules()
                     if isinstance(module, CQLinear) and module.cq_n % 1024]
     if incompatible:
-        preview = '\n'.join(f'  {name}: n={n}, m={m}, packed={shape}'
-                            for name, n, m, shape in incompatible[:12])
-        raise RuntimeError(
-            f'{len(incompatible)} CQ matrices have flat-packed nonaligned widths. '
-            f'The installed tiled operator is present={packed_backward_available()}, '
-            'but decode/tiled parity is insufficient to prove the correct CQ '
-            'forward adjoint. The current unswizzle requires n%1024==0. '
-            'A row-crossing polar permutation-aware VJP is still required. '
-            f'Examples:\n{preview}\nNo optimizer steps were performed.'
-        )
+        if not packed_backward_available():
+            raise RuntimeError('Nonaligned CQ matrices require the rebuilt padded-layout backward_packed_tiled operator')
+        # Probe the actual loaded binary on a real nonaligned checkpoint matrix.
+        name, n, m, shape = incompatible[0]
+        module = dict(model.named_modules())[name]
+        probe = torch.zeros((1, m), device=module.packed_all.device, dtype=torch.float16)
+        from kernel_backend import packed_backward_tiled
+        with torch.no_grad():
+            got = packed_backward_tiled(module.packed_all, probe, n, m)
+        expected_width = ((n + 1023) // 1024) * 1024
+        if tuple(got.shape) != (1, expected_width):
+            raise RuntimeError(f'Outdated CQ backward binary: {name} returned {tuple(got.shape)}, expected (1,{expected_width})')
     config = LoraConfig(task_type='CAUSAL_LM', r=a.rank, lora_alpha=a.alpha,
                         lora_dropout=a.lora_dropout, target_modules=matched, bias='none',
                         base_model_name_or_path=str(Path(a.model).resolve()))
