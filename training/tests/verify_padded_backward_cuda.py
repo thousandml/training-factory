@@ -42,9 +42,25 @@ def check(n, m=2048):
         xref = x.float().detach().requires_grad_(True)
         yref = swizzle(F.pad(xref, (0, npad - n))) @ weight.float().T
         (yref * gt.float()).sum().backward()
-        analytic = unswizzle(expected)[:, :n]
+        # Independent FP32 analytical gradient.
+        # Match the precision of the PyTorch autograd reference.
+        expected_fp32 = gt.float() @ weight.float()
+
+        analytic = unswizzle(expected_fp32)[:, :n]
         diff = (xref.grad - analytic).abs()
-        assert torch.allclose(xref.grad, analytic, atol=0.005, rtol=0.005), (n, L, diff.max().item())
+
+        print(
+            f'N={n} L={L} autograd '
+            f'max={diff.max().item():.6f} '
+            f'rmse={diff.square().mean().sqrt().item():.6f}'
+        )
+
+        assert torch.allclose(
+            xref.grad,
+            analytic,
+            atol=1e-3,
+            rtol=1e-3,
+        ), (n, L, diff.max().item())
     print('PASS', n)
 
 
