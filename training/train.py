@@ -146,7 +146,25 @@ def main():
                                 raise ValueError(f"Unsupported modality {part.get('type')}; audio/video not implemented")
                 if len(row_images) > 1:
                     raise ValueError('This initial bridge supports at most one image per training row')
-                prompts.append(processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False))
+                prompts.append((
+    processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=False
+    )
+    if getattr(processor, "chat_template", None)
+    else tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=False
+    )
+    if getattr(tokenizer, "chat_template", None)
+    else "\\n".join(
+        f"{msg['role'].capitalize()}: "
+        + (
+            msg['content']
+            if isinstance(msg['content'], str)
+            else str(msg['content'])
+        )
+        for msg in messages
+    )
+))
                 images.extend(row_images)
             if images and len(images) != len(rows):
                 raise ValueError('Mixed text-only and image-text rows in the same batch are not yet supported; use batch-size 1 or group rows by modality')
