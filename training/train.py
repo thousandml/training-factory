@@ -67,6 +67,25 @@ def main():
                and n.split('.')[-1] in targets]
     if not matched:
         raise ValueError(f'No LoRA targets matched {targets}; verify the Gemma 4 projection names')
+    # Fail before spending GPU time on an invalid first backward. The registered
+    # decode fallback is row-aligned, whereas CQ records can be flat-packed.
+    # A fused/tiled kernel can handle only geometries it explicitly advertises.
+    from kernel_backend import packed_backward_available, packed_backward_fused_available
+    incompatible = []
+    for name, module in model.named_modules():
+        if isinstance(module, CQLinear) and module.cq_n % 1024:
+            incompatible.append((name, module.cq_n, module.out_features,
+                                 tuple(module.packed_all.shape)))
+    if incompatible:
+        preview = '\n'.join(f'  {name}: n={n}, m={m}, packed={shape}'
+                            for name, n, m, shape in incompatible[:12])
+        raise RuntimeError(
+            f'{len(incompatible)} CQ matrices use flat-packed, non-1024-aligned '
+            f'input widths. Current CQ backward uses decode_weight for these '
+            f'geometries, which rejects them. Native backward support is required '
+            f'before training can be numerically safe. Examples:\n{preview}\n'
+            f'No optimizer steps were performed.'
+        )
     config = LoraConfig(task_type='CAUSAL_LM', r=a.rank, lora_alpha=a.alpha,
                         lora_dropout=a.lora_dropout, target_modules=matched, bias='none',
                         base_model_name_or_path=str(Path(a.model).resolve()))
