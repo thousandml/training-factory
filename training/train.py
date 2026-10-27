@@ -67,24 +67,24 @@ def main():
                and n.split('.')[-1] in targets]
     if not matched:
         raise ValueError(f'No LoRA targets matched {targets}; verify the Gemma 4 projection names')
-    # Fail before spending GPU time on an invalid first backward. The registered
-    # decode fallback is row-aligned, whereas CQ records can be flat-packed.
-    # A fused/tiled kernel can handle only geometries it explicitly advertises.
-    from kernel_backend import packed_backward_available, packed_backward_fused_available
-    incompatible = []
-    for name, module in model.named_modules():
-        if isinstance(module, CQLinear) and module.cq_n % 1024:
-            incompatible.append((name, module.cq_n, module.out_features,
-                                 tuple(module.packed_all.shape)))
+    # The flat-packed CUDA kernel accepts nonaligned dimensions, but parity
+    # against decode_weight alone does not establish parity with the CQ forward
+    # transform. In particular, the polar block permutation may cross logical
+    # matrix rows, so the existing unswizzle(gs) is not a valid adjoint.
+    from kernel_backend import packed_backward_available
+    incompatible = [(name, module.cq_n, module.out_features, tuple(module.packed_all.shape))
+                    for name, module in model.named_modules()
+                    if isinstance(module, CQLinear) and module.cq_n % 1024]
     if incompatible:
         preview = '\n'.join(f'  {name}: n={n}, m={m}, packed={shape}'
                             for name, n, m, shape in incompatible[:12])
         raise RuntimeError(
-            f'{len(incompatible)} CQ matrices use flat-packed, non-1024-aligned '
-            f'input widths. Current CQ backward uses decode_weight for these '
-            f'geometries, which rejects them. Native backward support is required '
-            f'before training can be numerically safe. Examples:\n{preview}\n'
-            f'No optimizer steps were performed.'
+            f'{len(incompatible)} CQ matrices have flat-packed nonaligned widths. '
+            f'The installed tiled operator is present={packed_backward_available()}, '
+            'but decode/tiled parity is insufficient to prove the correct CQ '
+            'forward adjoint. The current unswizzle requires n%1024==0. '
+            'A row-crossing polar permutation-aware VJP is still required. '
+            f'Examples:\n{preview}\nNo optimizer steps were performed.'
         )
     config = LoraConfig(task_type='CAUSAL_LM', r=a.rank, lora_alpha=a.alpha,
                         lora_dropout=a.lora_dropout, target_modules=matched, bias='none',
