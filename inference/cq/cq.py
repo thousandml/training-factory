@@ -190,6 +190,59 @@ def _install_cq_zero_checkpoint_weight_guard() -> None:
 
 _install_cq_zero_checkpoint_weight_guard()
 
+
+# ---------------------------------------------------------------------------
+# Gemma 4 multimodal: route vision/audio tower linears through CQ
+# ---------------------------------------------------------------------------
+#
+# vLLM's Gemma4ForConditionalGeneration only passes quant_config to the vision
+# and audio towers when the method is bitsandbytes / torchao /
+# compressed-tensors, or when hidden_size and intermediate_size are both
+# divisible by 64.  Gemma 4's vision tower has intermediate_size=4304, so for
+# "cq" vLLM silently builds the towers with quant_config=None.  The towers then
+# get plain ReplicatedLinear layers that expect full bf16 weights, while the CQ
+# residual checkpoint holds zero-size placeholders for them, and loading fails
+# with:
+#
+#   AssertionError: Tried to load weights of size torch.Size([0]) to a
+#   parameter of size torch.Size([4304, 1152])
+#
+# CQ resolves ownership per layer from the manifest, so it is safe to hand the
+# towers the CQ config: layers that are not in the manifest still fall back to
+# UnquantizedLinearMethod inside CqConfig.get_quant_method.
+def _install_cq_gemma4_tower_quant_patch() -> None:
+    if os.environ.get("CQ_GEMMA4_TOWER_PATCH", "1").strip().lower() in {
+        "0", "false", "off", "no",
+    }:
+        return
+    try:
+        import vllm.model_executor.models.gemma4_mm as _g4
+    except Exception:
+        return
+
+    original = getattr(_g4, "recursive_replace_linear", None)
+    if original is None or getattr(original, "_cq_tower_patch", False):
+        return
+
+    def _cq_recursive_replace_linear(model, quant_config, prefix=""):
+        if quant_config is None and _CQ_RUNTIME_ACTIVE:
+            try:
+                from vllm.config import get_current_vllm_config_or_none
+                vcfg = get_current_vllm_config_or_none()
+            except Exception:
+                vcfg = None
+            qc = getattr(vcfg, "quant_config", None) if vcfg is not None else None
+            if qc is not None and qc.get_name() == "cq":
+                if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
+                    print("[CQ GEMMA4 TOWER] routing", prefix,
+                          "through CQ quant config", flush=True)
+                quant_config = qc
+        return original(model, quant_config, prefix=prefix)
+
+    _cq_recursive_replace_linear._cq_tower_patch = True
+    _cq_recursive_replace_linear._cq_original = original
+    _g4.recursive_replace_linear = _cq_recursive_replace_linear
+
 from vllm.model_executor.layers.quantization import (
     register_quantization_config,
 )
@@ -2221,6 +2274,10 @@ class CqConfig(QuantizationConfig):
         # merged-column zero-placeholder compatibility guard before model
         # modules or checkpoint loaders are created.
         _cq_set_runtime_active(True)
+        # Gemma 4 drops quant_config for its vision/audio towers unless the
+        # method is allow-listed; make the towers CQ-aware before the model is
+        # built (see _install_cq_gemma4_tower_quant_patch).
+        _install_cq_gemma4_tower_quant_patch()
         # vLLM constructs the quantization config before it supplies the model
         # name/path. Defer manifest resolution until maybe_update_config().
         self.manifest = manifest
