@@ -2,13 +2,13 @@ import argparse
 import json
 import os
 from pathlib import Path
-from unsloth_compat import configure_checkpointing, optimizer_name
 import torch
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
 from transformers import AutoTokenizer, AutoProcessor, Trainer, TrainingArguments
 from load_model import load_model
 from gradient_safety import prepare_trainable_lora, install_nonfinite_gradient_guards
+from unsloth_compat import configure_checkpointing, optimizer_name
 
 
 def main():
@@ -36,6 +36,10 @@ def main():
     p.add_argument('--comparison-logs', action='store_true', help='Log actual consumed tokens, throughput and loss history')
     p.add_argument('--eval-data', help='Held-out JSONL data; same schema as training data')
     p.add_argument('--eval-steps', type=int, default=25)
+    p.add_argument('--eval-batch-size', type=int, default=2,
+                   help='Evaluation microbatch size (Unsloth baseline uses 2); eval is forward-only')
+    p.add_argument('--pad-to-multiple-of', type=int, default=8,
+                   help='Pad batch length; larger values (e.g. 64) mean fewer distinct shapes, so fewer cuFFT/cuBLAS plan builds during warmup')
     p.add_argument('--lora-dropout', type=float, default=0.05)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--checkpointing', choices=['native', 'unsloth'], default='unsloth',
@@ -51,6 +55,8 @@ def main():
         raise RuntimeError('This initial bridge supports one GPU only')
     if a.benchmark_warmup_steps < 0:
         raise ValueError('benchmark-warmup-steps must be nonnegative')
+    if a.eval_batch_size < 1 or a.pad_to_multiple_of < 1:
+        raise ValueError('eval-batch-size and pad-to-multiple-of must be >= 1')
     if not 0 <= a.lora_dropout < 1 or a.eval_steps < 1:
         raise ValueError('lora-dropout must be in [0,1) and eval-steps >= 1')
     if a.max_length < 2 or a.rank < 1:
@@ -184,7 +190,7 @@ def main():
         if not len(dataset):
             raise ValueError('No usable training examples')
         def collate(rows):
-            batch = tokenizer.pad(rows, return_tensors='pt', pad_to_multiple_of=8)
+            batch = tokenizer.pad(rows, return_tensors='pt', pad_to_multiple_of=a.pad_to_multiple_of)
             labels = batch['input_ids'].clone()
             labels[batch['attention_mask'] == 0] = -100
             batch['labels'] = labels
@@ -202,7 +208,7 @@ def main():
         collate = TokenCountingCollator(collate)
     args = TrainingArguments(output_dir=a.output, per_device_train_batch_size=a.batch_size,
         gradient_accumulation_steps=a.grad_accum, num_train_epochs=a.epochs,
-        per_device_eval_batch_size=1, prediction_loss_only=True, eval_accumulation_steps=1,
+        per_device_eval_batch_size=a.eval_batch_size, prediction_loss_only=True, eval_accumulation_steps=1,
         max_steps=a.max_steps, learning_rate=a.learning_rate, fp16=False, bf16=torch.cuda.is_bf16_supported(),
         gradient_checkpointing=True, gradient_checkpointing_kwargs={'use_reentrant': False},
         optim=selected_optimizer, logging_steps=1, save_steps=100, save_total_limit=2,
@@ -232,11 +238,14 @@ def main():
         trainer.add_callback(comparison)
     if a.benchmark:
         from benchmark import BenchmarkCallback
-        trainer.add_callback(BenchmarkCallback(
+        from benchmark import instrument_trainer
+        benchmark_callback = BenchmarkCallback(
             output_file=str(Path(a.output) / 'benchmark.json'),
             warmup_steps=a.benchmark_warmup_steps,
             token_counter=collate,
-        ))
+        )
+        trainer.add_callback(benchmark_callback)
+        instrument_trainer(trainer, benchmark_callback)
     result = trainer.train(resume_from_checkpoint=a.resume)
     model.save_pretrained(a.output, safe_serialization=True)
     tokenizer.save_pretrained(a.output)
