@@ -225,7 +225,11 @@ def _install_cq_gemma4_tower_quant_patch() -> None:
         return
 
     def _cq_recursive_replace_linear(model, quant_config, prefix=""):
-        if quant_config is None and _CQ_RUNTIME_ACTIVE:
+        # Do NOT gate on _CQ_RUNTIME_ACTIVE: vLLM unpickles CqConfig in the
+        # EngineCore process without running __init__, so that flag can still
+        # be False there.  The current vllm_config's method name is the
+        # reliable signal.
+        if quant_config is None:
             try:
                 from vllm.config import get_current_vllm_config_or_none
                 vcfg = get_current_vllm_config_or_none()
@@ -242,6 +246,18 @@ def _install_cq_gemma4_tower_quant_patch() -> None:
     _cq_recursive_replace_linear._cq_tower_patch = True
     _cq_recursive_replace_linear._cq_original = original
     _g4.recursive_replace_linear = _cq_recursive_replace_linear
+    if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
+        print("[CQ GEMMA4 TOWER] patch installed in pid", os.getpid(), flush=True)
+
+
+# Install at import time, like the zero-checkpoint guard above.  The vLLM
+# general-plugin entry point imports this module in EVERY process (API server
+# and EngineCore), whereas CqConfig.__init__ only runs where the config is
+# first constructed; the EngineCore receives a pickled copy.
+try:
+    _install_cq_gemma4_tower_quant_patch()
+except Exception as _exc:  # never block non-Gemma models
+    print("[CQ GEMMA4 TOWER] patch skipped:", repr(_exc), flush=True)
 
 from vllm.model_executor.layers.quantization import (
     register_quantization_config,
@@ -1109,6 +1125,13 @@ class CqModelManifest:
             )
         return None
 
+    def _cq_attention_k_eq_v(self) -> bool:
+        cfg = self.hf_config or {}
+        for c in (cfg, cfg.get("text_config") or {}):
+            if isinstance(c, dict) and c.get("attention_k_eq_v"):
+                return True
+        return False
+
     def resolve_packed_linear(
         self,
         prefix: str,
@@ -1144,6 +1167,20 @@ class CqModelManifest:
                 source_name = f"{base}.{source_suffix}"
                 manifest_name = self.resolve_linear_name(source_name)
                 if manifest_name is None:
+                    # Gemma 4 full-attention layers with attention_k_eq_v have
+                    # q_proj + k_proj but no v_proj; vLLM's QKVParallelLinear
+                    # still has a V slot and loads K into it.  Mirror that.
+                    if (
+                        kind == "qkv"
+                        and source_suffix == "v_proj"
+                        and len(resolved) == 2
+                        and self._cq_attention_k_eq_v()
+                    ):
+                        if os.environ.get("CQ_DEBUG_DISPATCH", "0") == "1":
+                            print("[CQ QKV K_EQ_V]", prefix,
+                                  "-> V slot uses", resolved[1], flush=True)
+                        resolved.append(resolved[1])
+                        continue
                     return None
                 resolved.append(manifest_name)
 
