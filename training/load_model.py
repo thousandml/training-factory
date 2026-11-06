@@ -43,6 +43,7 @@ def load_model(path, mapping_path=None, trust_remote_code=False, *, text_only=Fa
         m, n = plan['shape']
         base = CQLinear(n, m, rec, device='cuda')
         base._cq_fused_expected = len(plan['destinations'])
+        base.cq_record = record_name  # adapters are keyed by CQ record + row range
         for name, (start, end) in zip(plan['destinations'], plan['slices']):
             old = model.get_submodule(name)
             if len(plan['destinations']) == 1:

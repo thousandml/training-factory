@@ -1,4 +1,4 @@
-"""Numerical safeguards for frozen-CQ LoRA fine-tuning."""
+"""Numerical safeguards for frozen-CQ adapter fine-tuning (GCMP or LoRA)."""
 import torch
 
 
@@ -19,6 +19,7 @@ def prepare_trainable_lora(model):
 def install_nonfinite_gradient_guards(model):
     """Raise before any optimizer step that would apply a nonfinite adapter gradient.
 
+
     The previous per-parameter backward hook called ``.item()`` for every LoRA
     tensor on every micro-batch (~14 per decoder layer), forcing hundreds of
     CPU/GPU synchronizations per backward and stalling kernel queueing. A
@@ -37,9 +38,12 @@ def install_nonfinite_gradient_guards(model):
         if bad.any().item():
             names = [name for (name, _), b in zip(grads, bad.tolist()) if b]
             raise FloatingPointError(
-                f'Nonfinite LoRA gradient in {names[:5]}{" ..." if len(names) > 5 else ""} '
+                f'Nonfinite adapter gradient in {names[:5]}{" ..." if len(names) > 5 else ""} '
                 f'({len(names)} tensors); aborting before optimizer step. '
                 'Inspect CQ backward and activation magnitudes; do not disable this check.')
 
     from torch.optim.optimizer import register_optimizer_step_pre_hook
     return [register_optimizer_step_pre_hook(check)]
+
+
+prepare_trainable_adapter = prepare_trainable_lora

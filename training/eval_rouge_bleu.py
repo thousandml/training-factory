@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generation-based ROUGE/BLEU evaluation for CQ or Unsloth NF4 LoRA adapters.
+"""Generation-based ROUGE/BLEU evaluation for CQ GCMP / LoRA or Unsloth NF4 LoRA adapters.
 
 Input JSONL: {"instruction":"...", "input":"...", "output":"..."}
 Or {"messages":[{"role":"user","content":"..."},{"role":"assistant","content":"..."}]}.
@@ -96,13 +96,24 @@ def load_model(args):
             raise RuntimeError('No bitsandbytes NF4 Linear4bit modules found')
         print(f'Confirmed {nf4_count} NF4 modules', flush=True)
 
-    from peft import PeftModel
     from transformers import AutoTokenizer
     if args.adapter:
         adapter_path = Path(args.adapter)
         if not (adapter_path / 'adapter_config.json').exists():
-            raise FileNotFoundError(f'PEFT adapter_config.json missing: {adapter_path}')
-        model = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False)
+            raise FileNotFoundError(f'adapter_config.json missing: {adapter_path}')
+        adapter_type = json.loads((adapter_path / 'adapter_config.json').read_text()).get('adapter_type')
+        if adapter_type == 'cq_gcmp':
+            if args.backend != 'cq':
+                raise ValueError('GCMP adapters apply to CQ checkpoints only (--backend cq)')
+            import gcmp
+            cfg = json.loads((adapter_path / 'adapter_config.json').read_text())
+            targets = sorted({name.split('.')[-1] for name in cfg['modules']})
+            gcmp.inject_gcmp(model, targets, scale=cfg['scale'])
+            gcmp.load_adapter(model, adapter_path)
+            model.requires_grad_(False)
+        else:
+            from peft import PeftModel
+            model = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or args.model,
                                                trust_remote_code=args.trust_remote_code)
@@ -202,7 +213,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--backend', choices=['cq', 'unsloth'], required=True)
     p.add_argument('--model', required=True, help='Local CQ checkpoint or Unsloth prequantized NF4 model ID')
-    p.add_argument('--adapter', help='LoRA adapter output directory (omit to score base model)')
+    p.add_argument('--adapter', help='Adapter output directory: CQ GCMP or PEFT LoRA (omit to score base model)')
     p.add_argument('--tokenizer', help='Optional tokenizer path; defaults to --model')
     p.add_argument('--data', required=True, help='Held-out Alpaca instruction/output JSONL')
     p.add_argument('--output', required=True, help='Metrics JSON output path')

@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 import torch
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model
 from transformers import AutoTokenizer, AutoProcessor, Trainer, TrainingArguments
 from load_model import load_model
 from gradient_safety import prepare_trainable_lora, install_nonfinite_gradient_guards
@@ -23,6 +22,10 @@ def main():
     p.add_argument('--layer-map')
     p.add_argument('--text-only', action='store_true', help='Exclude absent vision/audio/MTP CQ records from text-only CausalLM')
     p.add_argument('--targets', default='q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj')
+    p.add_argument('--adapter', choices=['gcmp', 'lora'], default='gcmp',
+                   help='gcmp: CQ GCMP adapter (default, LoRA replacement); lora: PEFT LoRA')
+    p.add_argument('--gcmp-scale', type=float, default=1.0,
+                   help='GCMP output scale: y = W x + scale * dW x')
     p.add_argument('--rank', type=int, default=16)
     p.add_argument('--alpha', type=int, default=32)
     p.add_argument('--max-length', type=int, default=1024)
@@ -72,7 +75,7 @@ def main():
                if isinstance(m, (torch.nn.Linear, CQLinear, CQOutputSlice))
                and n.split('.')[-1] in targets]
     if not matched:
-        raise ValueError(f'No LoRA targets matched {targets}; verify the Gemma 4 projection names')
+        raise ValueError(f'No adapter targets matched {targets}; verify the projection names')
     # Require a padded-layout tiled VJP for nonaligned CQ matrices.
     # Older binaries returned [L,N] and are unsafe; the operator contract
     # is checked by a dedicated CUDA parity/preflight script before training.
@@ -93,15 +96,25 @@ def main():
         expected_width = ((n + 1023) // 1024) * 1024
         if tuple(got.shape) != (1, expected_width):
             raise RuntimeError(f'Outdated CQ backward binary: {name} returned {tuple(got.shape)}, expected (1,{expected_width})')
-    config = LoraConfig(task_type='CAUSAL_LM', r=a.rank, lora_alpha=a.alpha,
-                        lora_dropout=a.lora_dropout, target_modules=matched, bias='none',
-                        base_model_name_or_path=str(Path(a.model).resolve()))
-    # Configure before PEFT wrapping so the model's checkpoint hooks are patched.
+    base_model_path = str(Path(a.model).resolve())
+    # Configure before adapter wrapping so the model's checkpoint hooks are patched.
     configure_checkpointing(a.checkpointing)
     selected_optimizer = optimizer_name(a.optimizer)
     load_report = model._cq_load_report
-    model = get_peft_model(model, config)
-    model.print_trainable_parameters()
+    if a.adapter == 'gcmp':
+        import gcmp
+        gcmp.inject_gcmp(model, targets, scale=a.gcmp_scale)
+        # Checkpointed blocks need a grad-requiring input when every base
+        # weight (including embeddings) is frozen.
+        model.enable_input_require_grads()
+        print(gcmp.trainable_summary(model))
+    else:
+        from peft import LoraConfig, get_peft_model
+        config = LoraConfig(task_type='CAUSAL_LM', r=a.rank, lora_alpha=a.alpha,
+                            lora_dropout=a.lora_dropout, target_modules=matched, bias='none',
+                            base_model_name_or_path=base_model_path)
+        model = get_peft_model(model, config)
+        model.print_trainable_parameters()
     prepare_trainable_lora(model)
     _gradient_guards = install_nonfinite_gradient_guards(model)
     processor = None
@@ -220,13 +233,19 @@ def main():
         trainer_class = CountedTrainer
     else:
         trainer_class = Trainer
+    if a.adapter == 'gcmp':
+        # Checkpoints/resume hold adapter coefficients only, never frozen CQ buffers.
+        trainer_class = gcmp.adapter_trainer_class(trainer_class, base_model_path)
     trainer = trainer_class(model=model, args=args, train_dataset=dataset, eval_dataset=eval_dataset,
                             data_collator=collate, processing_class=processor or tokenizer)
     if a.comparison_logs:
         comparison = ComparisonMetricsCallback(a.output, {
             'model': a.model, 'train_data': a.data, 'eval_data': a.eval_data,
-            'quantization': 'CQ 4bit', 'targets': targets, 'rank': a.rank,
-            'alpha': a.alpha, 'lora_dropout': a.lora_dropout,
+            'quantization': 'CQ 4bit', 'targets': targets, 'adapter': a.adapter,
+            'gcmp_scale': a.gcmp_scale if a.adapter == 'gcmp' else None,
+            'rank': a.rank if a.adapter == 'lora' else None,
+            'alpha': a.alpha if a.adapter == 'lora' else None,
+            'lora_dropout': a.lora_dropout if a.adapter == 'lora' else None,
             'batch_size': a.batch_size, 'grad_accum': a.grad_accum,
             'max_length': a.max_length, 'max_steps': a.max_steps,
             'learning_rate': a.learning_rate, 'seed': a.seed,
@@ -247,7 +266,10 @@ def main():
         trainer.add_callback(benchmark_callback)
         instrument_trainer(trainer, benchmark_callback)
     result = trainer.train(resume_from_checkpoint=a.resume)
-    model.save_pretrained(a.output, safe_serialization=True)
+    if a.adapter == 'gcmp':
+        gcmp.save_adapter(model, a.output, base_model_path)
+    else:
+        model.save_pretrained(a.output, safe_serialization=True)
     tokenizer.save_pretrained(a.output)
     trainer.save_metrics('train', result.metrics)
     Path(a.output, 'cq_load_report.json').write_text(json.dumps(load_report, indent=2))
