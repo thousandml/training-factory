@@ -7,6 +7,7 @@ supported.
 
 from .cq import CqConfig, CqLinearMethod, configure_cq_pipeline_partition
 from . import runtime_ops as _runtime_ops  # registers FakeTensor metadata
+from .gcmp_adapter import swap_adapter, swap_adapter_llm  # GCMP adapter
 
 
 def register() -> None:
@@ -27,4 +28,5 @@ def register() -> None:
         )
 
 
-__all__ = ["CqConfig", "CqLinearMethod", "configure_cq_pipeline_partition", "register"]
+__all__ = ["CqConfig", "CqLinearMethod", "configure_cq_pipeline_partition", "register",
+           "swap_adapter", "swap_adapter_llm"]

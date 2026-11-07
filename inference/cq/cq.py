@@ -15,6 +15,8 @@ from torch.nn.parameter import Parameter
 from huggingface_hub import snapshot_download
 import multiprocessing
 
+from . import gcmp_adapter as _cq_gcmp  # GCMP adapter plug-in
+
 
 def _cq_is_ple_offload_worker() -> bool:
     return multiprocessing.current_process().name == "PleOffloadWorker"
@@ -2374,6 +2376,10 @@ class CqConfig(QuantizationConfig):
             revision=revision,
         )
 
+        # Optional GCMP adapter (CQ_GCMP_ADAPTER): load + validate
+        # against this manifest before any layer is constructed.
+        _cq_gcmp.active_store(self.manifest)
+
         # Install the memory-aware vLLM PP split before model construction.
         configure_cq_pipeline_partition(self.manifest)
 
@@ -2829,6 +2835,7 @@ class CqQKVMethod(_CqPackedLinearMethodBase):
         self.quant_config = quant_config
         self.prefixes = list(prefixes)
         self.q_prefix, self.k_prefix, self.v_prefix = self.prefixes
+        self.input_size = int(input_size)
         self.N = ((int(input_size) + 31) // 32) * 32
         self.output_size = int(output_size)
 
@@ -2883,6 +2890,11 @@ class CqQKVMethod(_CqPackedLinearMethodBase):
         _copy_cq_record_into_named_slot(layer, self.quant_config.manifest, self.q_prefix, "q")
         _copy_cq_record_into_named_slot(layer, self.quant_config.manifest, self.k_prefix, "k")
         _copy_cq_record_into_named_slot(layer, self.quant_config.manifest, self.v_prefix, "v")
+        _cq_gcmp.attach(layer, self, [
+            (self.q_prefix, 0, self.q_M),
+            (self.k_prefix, self.q_M, self.k_M),
+            (self.v_prefix, self.q_M + self.k_M, self.v_M),
+        ], self.input_size, self.output_size, _cq_runtime_device())
 
     def apply(
         self,
@@ -2894,6 +2906,7 @@ class CqQKVMethod(_CqPackedLinearMethodBase):
         k = self._apply_slot(layer, input, "k", self.N, self.k_M)
         v = self._apply_slot(layer, input, "v", self.N, self.v_M)
         out = torch.cat((q, k, v), dim=-1)
+        out = _cq_gcmp.add_delta(self, layer, input, out)
         if bias is not None:
             out = out + bias
         return out
@@ -2926,6 +2939,7 @@ class CqConcatPackedMethod(_CqPackedLinearMethodBase):
         self.quant_config = quant_config
         self.prefixes = list(prefixes)
         self.kind = str(kind)
+        self.input_size = int(input_size)
         self.N = ((int(input_size) + 31) // 32) * 32
         self.output_size = int(output_size)
         self._slots: list[tuple[str, str, int]] = []
@@ -2976,6 +2990,11 @@ class CqConcatPackedMethod(_CqPackedLinearMethodBase):
             _copy_cq_record_into_named_slot(
                 layer, self.quant_config.manifest, record_prefix, slot
             )
+        slots, offset = [], 0
+        for _slot, record_prefix, M in self._slots:
+            slots.append((record_prefix, offset, M))
+            offset += M
+        _cq_gcmp.attach(layer, self, slots, self.input_size, self.output_size, _cq_runtime_device())
 
     def apply(
         self,
@@ -2988,6 +3007,7 @@ class CqConcatPackedMethod(_CqPackedLinearMethodBase):
             for slot, _record_prefix, M in self._slots
         ]
         out = torch.cat(parts, dim=-1)
+        out = _cq_gcmp.add_delta(self, layer, input, out)
         if bias is not None:
             out = out + bias
         return out
@@ -3009,6 +3029,7 @@ class CqGateUpMethod(_CqPackedLinearMethodBase):
         self.quant_config = quant_config
         self.prefixes = list(prefixes)
         self.gate_prefix, self.up_prefix = self.prefixes
+        self.input_size = int(input_size)
         self.N = ((int(input_size) + 31) // 32) * 32
         self.output_size = int(output_size)
 
@@ -3058,6 +3079,10 @@ class CqGateUpMethod(_CqPackedLinearMethodBase):
         _copy_cq_record_into_named_slot(
             layer, self.quant_config.manifest, self.up_prefix, "up"
         )
+        _cq_gcmp.attach(layer, self, [
+            (self.gate_prefix, 0, self.gate_M),
+            (self.up_prefix, self.gate_M, self.up_M),
+        ], self.input_size, self.output_size, _cq_runtime_device())
 
     def apply(
         self,
@@ -3068,6 +3093,7 @@ class CqGateUpMethod(_CqPackedLinearMethodBase):
         gate = self._apply_slot(layer, input, "gate", self.N, self.gate_M)
         up = self._apply_slot(layer, input, "up", self.N, self.up_M)
         out = torch.cat((gate, up), dim=-1)
+        out = _cq_gcmp.add_delta(self, layer, input, out)
         if bias is not None:
             out = out + bias
         return out
@@ -3245,6 +3271,8 @@ class CqLinearMethod(LinearMethodBase):
             self.quant_config.manifest,
             self.prefix,
         )
+        _cq_gcmp.attach(layer, self, [(self.prefix, 0, self.M)],
+                      self.input_size, self.output_size, self.device)
 
     def apply(
         self,
@@ -3277,6 +3305,10 @@ class CqLinearMethod(LinearMethodBase):
             M=self.M,
             bias=bias,
         )
+
+        # GCMP adapter rows are trained in CQ record-row order,
+        # so add the delta before any runtime row reordering.
+        out = _cq_gcmp.add_delta(self, layer, input, out)
 
         # Existing MiMo CQ checkpoints were quantized from the checkpoint's
         # grouped fused-QKV rows. Reorder the resulting activations into the
