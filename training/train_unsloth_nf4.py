@@ -170,6 +170,30 @@ class ComparisonLogger(TrainerCallback):
             with open(os.path.join(self.output, name), 'w', encoding='utf-8') as f:
                 json.dump(obj, f, indent=2)
 
+def allow_quantized_training_with_gcmp():
+    """Let HF Trainer accept a quantized base that carries GCMP adapters.
+
+    Trainer refuses to fine-tune a quantized model unless it is a PEFT model.
+    GCMP adapters are not PEFT modules, so the check is extended: models with
+    trainable GCMP projections pass, everything else is checked as before.
+    """
+    import transformers.trainer as hf_trainer
+    import transformers.trainer_utils as hf_trainer_utils
+    import gcmp
+    for mod in (hf_trainer, hf_trainer_utils):
+        original = getattr(mod, 'validate_quantization_for_training', None)
+        if original is None or getattr(original, '_cq_gcmp', False):
+            continue
+
+        def validate(model, _original=original):
+            if any(p.requires_grad for m in gcmp.gcmp_modules(model).values() for p in m.parameters()):
+                return None
+            return _original(model)
+
+        validate._cq_gcmp = True
+        mod.validate_quantization_for_training = validate
+
+
 def attach_gcmp(model, tokenizer, a):
     """Freeze the NF4 model and wrap the same target projections with GCMP."""
     import importlib
@@ -201,6 +225,7 @@ def attach_gcmp(model, tokenizer, a):
         model, lambda: model(input_ids=probe['input_ids'], attention_mask=probe['attention_mask']).logits,
         'the Unsloth training forward')
     model.train(was_training)
+    allow_quantized_training_with_gcmp()
     return model
 
 
