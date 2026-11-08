@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Matched text-only QLoRA baseline using Unsloth's PREQUANTIZED Qwen3.8-27B NF4 checkpoint."""
+"""Matched text-only Unsloth NF4 baseline: LoRA (default) or the GCMP adapter.
+
+Both adapters use the same PREQUANTIZED Qwen3.8-27B NF4 checkpoint, data, trainer
+and schedule, so `--adapter lora` vs `--adapter gcmp` isolates the adapter.
+"""
 import argparse
 import json
 import os
@@ -166,6 +170,40 @@ class ComparisonLogger(TrainerCallback):
             with open(os.path.join(self.output, name), 'w', encoding='utf-8') as f:
                 json.dump(obj, f, indent=2)
 
+def attach_gcmp(model, tokenizer, a):
+    """Freeze the NF4 model and wrap the same target projections with GCMP."""
+    import importlib
+    from _cq_training_license import require_valid
+    require_valid()
+    try:
+        importlib.import_module(a.kernel_module)
+    except ImportError as exc:
+        print(f'CQ-GCMP: {a.kernel_module} not importable ({exc}); using the torch implementation')
+    import gcmp
+    from unsloth_compat import configure_checkpointing
+    configure_checkpointing('unsloth')  # same smart checkpointing as the CQ trainer
+    if hasattr(FastModel, 'for_training'):
+        FastModel.for_training(model)
+    model.requires_grad_(False)
+    towers = {'visual', 'vision', 'vision_tower', 'vision_model', 'audio', 'audio_tower', 'audio_model'}
+    # Language layers only, matching LoRA's finetune_vision_layers=False.
+    gcmp.inject_gcmp(model, getattr(a, 'targets', TARGETS), scale=a.gcmp_scale, allow_dense=True,
+                     include=lambda name: towers.isdisjoint(name.split('.')))
+    model.enable_input_require_grads()
+    print(gcmp.trainable_summary(model))
+    tok = getattr(tokenizer, 'tokenizer', tokenizer)
+    params = list(model.parameters())
+    device = next((p.device for p in params if p.device.type == 'cuda'), params[0].device)
+    probe = tok('GCMP adapter probe: the quick brown fox.', return_tensors='pt').to(device)
+    was_training = model.training
+    model.eval()
+    gcmp.require_adapter_active(
+        model, lambda: model(input_ids=probe['input_ids'], attention_mask=probe['attention_mask']).logits,
+        'the Unsloth training forward')
+    model.train(was_training)
+    return model
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--model', default=DEFAULT_MODEL,
@@ -179,6 +217,12 @@ def main():
     p.add_argument('--eval-steps', type=int, default=100)
     p.add_argument('--save-steps', type=int, default=100)
     p.add_argument('--benchmark-warmup-steps', type=int, default=10)
+    p.add_argument('--adapter', choices=['lora', 'gcmp'], default='lora',
+                   help='lora: Unsloth LoRA r=32 (baseline); gcmp: GCMP adapter on the same NF4 base')
+    p.add_argument('--learning-rate', type=float, default=2e-5)
+    p.add_argument('--gcmp-scale', type=float, default=1.0)
+    p.add_argument('--kernel-module', default='cq.cq_kernels',
+                   help='GCMP only: extension providing my_qlinear::gcmp_* (falls back to torch if absent)')
     a = p.parse_args()
 
     os.makedirs(a.output, exist_ok=True)
@@ -214,20 +258,23 @@ def main():
         raise RuntimeError(f'Expected NF4 bitsandbytes Linear4bit modules; found {n_bnb}, types={qtypes}')
     print(f'Confirmed {n_bnb} bitsandbytes NF4 Linear4bit modules')
 
-    model = FastModel.get_peft_model(
-        model,
-        r=32,
-        lora_alpha=32,
-        lora_dropout=0,
-        target_modules=TARGETS,
-        bias='none',
-        use_gradient_checkpointing='unsloth',
-        random_state=a.seed,
-        finetune_vision_layers=False,
-        finetune_language_layers=True,
-        finetune_attention_modules=True,
-        finetune_mlp_modules=True,
-    )
+    if a.adapter == 'lora':
+        model = FastModel.get_peft_model(
+            model,
+            r=32,
+            lora_alpha=32,
+            lora_dropout=0,
+            target_modules=TARGETS,
+            bias='none',
+            use_gradient_checkpointing='unsloth',
+            random_state=a.seed,
+            finetune_vision_layers=False,
+            finetune_language_layers=True,
+            finetune_attention_modules=True,
+            finetune_mlp_modules=True,
+        )
+    else:
+        model = attach_gcmp(model, tokenizer, a)
 
     config = SFTConfig(
         output_dir=a.output,
@@ -238,7 +285,7 @@ def main():
         gradient_accumulation_steps=4,
         per_device_eval_batch_size=2,
         max_steps=a.max_steps,
-        learning_rate=2e-5,
+        learning_rate=a.learning_rate,
         lr_scheduler_type='linear',
         warmup_steps=0,
         weight_decay=0.0,
@@ -255,20 +302,31 @@ def main():
         seed=a.seed,
         data_seed=a.seed,
         remove_unused_columns=False,
+        # LoRA: Unsloth enables its checkpointing inside get_peft_model.
+        # GCMP: same smart checkpointing patch (see attach_gcmp) via the Trainer.
+        gradient_checkpointing=(a.adapter == 'gcmp'),
+        gradient_checkpointing_kwargs={'use_reentrant': False} if a.adapter == 'gcmp' else None,
     )
     with open(os.path.join(a.output, 'comparison_config.json'), 'w', encoding='utf-8') as f:
+        lora_fields = ({'rank': 32, 'alpha': 32, 'dropout': 0} if a.adapter == 'lora'
+                       else {'rank': None, 'alpha': None, 'dropout': None, 'gcmp_scale': a.gcmp_scale})
         json.dump({'model': a.model, 'quantization': 'bnb_nf4_prequantized',
-                   'targets': TARGETS, 'rank': 32, 'alpha': 32, 'dropout': 0,
+                   'adapter': a.adapter, 'targets': TARGETS, **lora_fields,
                    'train_data': a.train_data, 'eval_data': a.eval_data,
                    'max_length': a.max_length, 'seed': a.seed,
                    'max_steps': a.max_steps, 'batch_size': 2, 'grad_accum': 4,
-                   'learning_rate': 2e-5, 'optimizer': 'adamw_torch',
+                   'learning_rate': a.learning_rate, 'optimizer': 'adamw_torch',
                    'scheduler': 'linear', 'warmup_steps': 0, 'weight_decay': 0.0,
                    'eval_steps': a.eval_steps, 'save_steps': a.save_steps,
                    'benchmark_warmup_steps': a.benchmark_warmup_steps}, f, indent=2)
 
     logger = ComparisonLogger(a.output, a.benchmark_warmup_steps)
-    trainer = CountedSFTTrainer(
+    trainer_class = CountedSFTTrainer
+    if a.adapter == 'gcmp':
+        import gcmp
+        # Checkpoints and the final save hold adapter coefficients only.
+        trainer_class = gcmp.adapter_trainer_class(CountedSFTTrainer, base_model=a.model)
+    trainer = trainer_class(
         model=model,
         args=config,
         train_dataset=train_ds,

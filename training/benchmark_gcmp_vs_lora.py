@@ -47,6 +47,47 @@ def timer(fn, device, warmup, iters):
     return (time.perf_counter() - t) / iters * 1e3
 
 
+def stage_breakdown(x, coef, gcmp, dev, warmup, iters):
+    """Time each GCMP stage (same math as the native op, written with torch ops).
+
+    Shows whether the prime-length FFTs, the re-indexing (which writes Phi),
+    or the GEMMs dominate, i.e. whether a fused kernel that never writes Phi
+    would pay off. Private tool.
+    """
+    g = gcmp.geometry(x.shape[1])
+    B, p, S = x.shape[0], g['p'], g['S']
+    spec = gcmp.prepare_coef(coef.detach())
+    R = spec.shape[0]
+    idx = gcmp._line_index(p, S, x.device)[None, :, :, None].expand(B, p, S + 1, 2)
+    xf = torch.nn.functional.pad(x.detach().float(), (0, g['L_pad'] - g['L'])).reshape(B, S, p)
+    A = torch.fft.rfft(xf, dim=-1)
+    Ap = A.new_zeros((B, p, S + 1)); Ap[:, 1:S + 1] = A
+    U = torch.fft.ifft(Ap, dim=1, norm='forward')
+    Phi = torch.gather(torch.view_as_real(U), 1, idx).reshape(B, p, 2 * (S + 1))
+    st = spec.t().contiguous()
+    G3 = (Phi @ st)
+    dPhi = G3 @ spec
+    d4 = dPhi.contiguous().view(B, p, S + 1, 2)
+    stages = {
+        'fwd: rfft over blocks (prime length)': lambda: torch.fft.rfft(xf, dim=-1),
+        'fwd: pad + fft over block axis (prime length)': lambda: torch.fft.ifft(Ap, dim=1, norm='forward'),
+        'fwd: re-index -> Phi (memory pass)': lambda: torch.gather(torch.view_as_real(U), 1, idx),
+        'fwd: GEMM Phi @ spec^T': lambda: Phi @ st,
+        'bwd: GEMM dspec = G^T Phi': lambda: G3.reshape(-1, R).t() @ Phi.reshape(-1, p + 1),
+        'bwd: GEMM dPhi = G spec': lambda: G3 @ spec,
+        'bwd: scatter-add (adjoint re-index)': lambda: d4.new_zeros(d4.shape).scatter_add_(1, idx, d4),
+        'bwd: fft + irfft (adjoint transforms)': lambda: torch.fft.irfft(
+            torch.fft.fft(torch.view_as_complex(d4.contiguous()), dim=1)[:, 1:S + 1], n=p, dim=-1, norm='forward'),
+    }
+    out = {k: timer(f, dev, warmup, iters) for k, f in stages.items()}
+    total = sum(out.values())
+    phi_mb = B * p * (p + 1) * 4 / 2**20
+    print(f'    stage breakdown (L={g["L"]}, p={p}, Phi {phi_mb:.0f} MB for {B} tokens):')
+    for k, v in out.items():
+        print(f'      {k:48s} {v:8.3f} ms  {100 * v / total:5.1f}%')
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--kernel-module', default='cq.cq_kernels')
@@ -59,6 +100,7 @@ def main():
     ap.add_argument('--iters', type=int, default=20)
     ap.add_argument('--tf32', action='store_true', help='allow TF32 for GCMP fp32 GEMMs')
     ap.add_argument('--json', help='write results here')
+    ap.add_argument('--stages', action='store_true', help='also print a per-stage GCMP time breakdown')
     a = ap.parse_args()
 
     from _cq_training_license import require_valid
@@ -99,7 +141,7 @@ def main():
         def gemms():  # forward Phi@spec^T, dspec, dPhi
             Y = Phi @ spec.t()
             G = Y
-            G.reshape(-1, R).t() @ Phi.reshape(-1, p)
+            G.reshape(-1, R).t() @ Phi.reshape(-1, p + 1)
             G @ spec
 
         t_gcmp = timer(gcmp_step, dev, a.warmup, a.iters)
@@ -128,6 +170,7 @@ def main():
             gy @ Wd
         t_dense = timer(dense_step, dev, a.warmup, a.iters)
 
+        stage_times = stage_breakdown(x, coef, gcmp, dev, a.warmup, a.iters) if a.stages else None
         cross = None
         rs = sorted(lora)
         for r0, r1 in zip(rs, rs[1:]):
@@ -141,7 +184,7 @@ def main():
         row = {'L': L, 'M': M, 'p': p, 'gcmp_ms': t_gcmp, 'gcmp_transform_ms': t_tr,
                'gcmp_gemm_ms': t_mm, 'lora_ms': lora, 'dense_frozen_ms': t_dense,
                'measured_break_even_rank': cross, 'mac_break_even_rank': mac_break_even,
-               'gcmp_params': R * p, 'lora32_params': 32 * (L + M)}
+               'gcmp_params': R * p, 'lora32_params': 32 * (L + M), 'gcmp_stage_ms': stage_times}
         results.append(row)
         lr = ' '.join(f'r{r}:{t:.3f}' for r, t in lora.items())
         ce = f'{cross:.0f}' if isinstance(cross, float) else cross

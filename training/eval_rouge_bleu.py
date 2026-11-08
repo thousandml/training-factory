@@ -79,9 +79,9 @@ def load_model(args):
         model, _ = FastModel.from_pretrained(
             model_name=args.model,
             max_seq_length=args.max_input_tokens + args.max_new_tokens,
-            load_in_4bit=True,
+            load_in_4bit=not args.unsloth_16bit,
             load_in_8bit=False,
-            load_in_16bit=False,
+            load_in_16bit=args.unsloth_16bit,
         )
         nf4_count = 0
         for module in model.modules():
@@ -92,9 +92,14 @@ def load_model(args):
                 if qtype != 'nf4':
                     raise RuntimeError(f'Expected NF4, got {qtype}')
                 nf4_count += 1
-        if nf4_count == 0:
-            raise RuntimeError('No bitsandbytes NF4 Linear4bit modules found')
-        print(f'Confirmed {nf4_count} NF4 modules', flush=True)
+        if args.unsloth_16bit:
+            if nf4_count:
+                raise RuntimeError(f'--unsloth-16bit given but the model has {nf4_count} NF4 modules')
+            print('Loaded full-precision (16-bit) Unsloth base', flush=True)
+        elif nf4_count == 0:
+            raise RuntimeError('No bitsandbytes NF4 Linear4bit modules found (use --unsloth-16bit for a 16-bit base)')
+        else:
+            print(f'Confirmed {nf4_count} NF4 modules', flush=True)
 
     from transformers import AutoTokenizer
     if args.adapter:
@@ -103,12 +108,19 @@ def load_model(args):
             raise FileNotFoundError(f'adapter_config.json missing: {adapter_path}')
         adapter_type = json.loads((adapter_path / 'adapter_config.json').read_text()).get('adapter_type')
         if adapter_type == 'cq_gcmp':
-            if args.backend != 'cq':
-                raise ValueError('GCMP adapters apply to CQ checkpoints only (--backend cq)')
             import gcmp
             cfg = json.loads((adapter_path / 'adapter_config.json').read_text())
+            if args.backend == 'unsloth':
+                from _cq_training_license import require_valid
+                require_valid()
+                import importlib
+                try:
+                    importlib.import_module(args.kernel_module)
+                except ImportError as exc:
+                    print(f'CQ-GCMP: {args.kernel_module} not importable ({exc}); using the torch implementation')
             targets = sorted({name.split('.')[-1] for name in cfg['modules']})
-            gcmp.inject_gcmp(model, targets, scale=cfg['scale'])
+            gcmp.inject_gcmp(model, targets, scale=cfg['scale'], allow_dense=(args.backend == 'unsloth'),
+                             include=lambda name: name in cfg['modules'])
             gcmp.load_adapter(model, adapter_path)
             model.requires_grad_(False)
         else:
@@ -122,6 +134,55 @@ def load_model(args):
     tokenizer.padding_side = 'left'
     return model, tokenizer
 
+
+
+def choose_generation_cache(model, tokenizer, device):
+    """use_cache setting under which generation really applies a GCMP adapter.
+
+    Unsloth's cached decode can call base weights directly, skipping wrapped
+    modules. Uncached generation recomputes every step through the normal
+    forward, so it is the reference: with the adapter perturbed, cached and
+    uncached step-2 logits must agree to within their adapter-free numerical
+    gap. A bypassed cached decode differs by a sizeable part of the adapter's
+    effect. Falls back to use_cache=False when the cached path bypasses.
+    """
+    import torch
+    import gcmp
+    probe = tokenizer('Answer in one word: the color of the sky is', return_tensors='pt').to(device)
+
+    def generate(use_cache):
+        with torch.inference_mode():
+            out = model.generate(**probe, max_new_tokens=2, min_new_tokens=2, do_sample=False,
+                                 use_cache=use_cache, output_scores=True, return_dict_in_generate=True,
+                                 pad_token_id=tokenizer.pad_token_id)
+        return int(out.sequences[0, -2]), out.scores[0].float(), out.scores[1].float()
+
+    def diff(x, y):  # min_new_tokens masks EOS to -inf; compare finite logits only
+        ok = torch.isfinite(x) & torch.isfinite(y)
+        return (x - y)[ok].abs().max().item() if ok.any() else 0.0
+
+    with gcmp.coefficients_zeroed(model):
+        z_cache, z_plain, z_plain2 = generate(True), generate(False), generate(False)
+    noise = max(diff(z_plain[1], z_plain2[1]), diff(z_plain[2], z_plain2[2]))
+    base_gap = diff(z_cache[2], z_plain[2])  # cached vs uncached, adapter-free
+    for eps in (1e-2, 3e-3, 1e-3, 3e-4, 1e-4):
+        with gcmp.coefficients_perturbed(model, eps):
+            p_cache, p_plain = generate(True), generate(False)
+        if p_plain[0] == z_plain[0]:
+            break
+    if diff(p_plain[1], z_plain[1]) <= 10 * noise:
+        raise RuntimeError('GCMP adapter is not applied during generation on this backend '
+                           '(even uncached decoding bypasses it)')
+    same_token = p_plain[0] == z_plain[0]
+    effect = diff(p_plain[2], z_plain[2]) if same_token else 0.0
+    gap = diff(p_cache[2], p_plain[2])
+    tolerance = max(10 * base_gap, 10 * noise, 0.05 * effect)
+    if p_cache[0] == p_plain[0] and gap <= tolerance:
+        print(f'CQ-GCMP: adapter verified active in cached generation (gap {gap:.3g} <= {tolerance:.3g})', flush=True)
+        return True
+    print(f'CQ-GCMP: WARNING cached decode bypasses the adapter on this backend (gap {gap:.3g} > '
+          f'{tolerance:.3g}); generating with use_cache=False (correct but slower)', flush=True)
+    return False
 
 
 def evaluation_signature(args, examples):
@@ -225,6 +286,7 @@ def main():
     p.add_argument('--kernel-module', default='cq.cq_kernels')
     p.add_argument('--kernel-backend', choices=['auto', 'raw', 'registered'], default='auto')
     p.add_argument('--trust-remote-code', action='store_true')
+    p.add_argument('--unsloth-16bit', action='store_true', help='Unsloth backend: load a full-precision (bf16/fp16) base instead of NF4')
     p.add_argument('--resume', action='store_true', help='Resume from per-example predictions JSONL')
     args = p.parse_args()
     if args.max_input_tokens < 1 or args.max_new_tokens < 1 or args.limit < 0:
@@ -250,6 +312,9 @@ def main():
         device = next((p.device for p in model.parameters() if p.device.type not in ('meta', 'cpu')), None)
         if device is None:
             raise RuntimeError('Could not find model parameters on CUDA')
+        use_cache = True
+        if any(type(m).__name__ == 'GCMPLinear' for m in model.modules()):
+            use_cache = choose_generation_cache(model, tokenizer, device)
         with pred_path.open('a', encoding='utf-8') as checkpoint:
             for i, (messages, reference) in enumerate(examples, 1):
                 if i in completed:
@@ -264,7 +329,7 @@ def main():
                         do_sample=False,
                         pad_token_id=tokenizer.pad_token_id,
                         eos_token_id=tokenizer.eos_token_id,
-                        use_cache=True,
+                        use_cache=use_cache,
                     )
                 prediction = tokenizer.decode(
                     generated[0, inputs['input_ids'].shape[-1]:],

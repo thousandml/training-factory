@@ -70,13 +70,18 @@ class AdapterStore:
             )
         if int(cfg.get("format_version", 0)) != FORMAT_VERSION:
             raise RuntimeError(f"CQ-GCMP: unsupported adapter format_version {cfg.get('format_version')!r}")
+        if cfg.get("base_kind", "cq") != "cq":
+            raise RuntimeError(
+                f"CQ-GCMP: {self.path} was trained on a non-CQ base (base_kind={cfg.get('base_kind')!r}, "
+                "e.g. Unsloth NF4); this plug-in serves adapters trained on CQ checkpoints only"
+            )
         self.config = cfg
         self.scale = float(cfg.get("scale", 1.0) if scale is None else scale)
         self.tensors = load_file(str(self.path / WEIGHTS_NAME))
         self.by_record: dict[str, list[AdapterEntry]] = {}
         for name, spec in cfg["modules"].items():
             if spec.get("cq_record") is None:
-                raise RuntimeError(f"CQ-GCMP: adapter module {name!r} has no cq_record")
+                raise RuntimeError(f"CQ-GCMP: adapter module {name!r} has no cq_record (not trained on a CQ checkpoint)")
             entry = AdapterEntry(
                 module=name,
                 key=spec["key"],
