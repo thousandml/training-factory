@@ -54,9 +54,13 @@ def read_examples(path, limit, seed):
     return rows
 
 
-def build_prompt(tokenizer, messages):
+def build_prompt(tokenizer, messages, enable_thinking=False):
     if getattr(tokenizer, 'chat_template', None):
-        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        # Thinking-capable chat templates (Qwen3.x) otherwise open a reasoning
+        # block, and the scored text is mostly reasoning, often cut off before
+        # any answer. Templates without the variable ignore it.
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
+                                             enable_thinking=enable_thinking)
     # For base checkpoints without a chat template, keep the prompt deterministic.
     prefix = '\n'.join(f"{m['role'].capitalize()}: {m['content']}" for m in messages)
     return prefix + '\nAssistant:'
@@ -193,6 +197,7 @@ def evaluation_signature(args, examples):
         'kernel_backend': args.kernel_backend, 'seed': args.seed,
         'max_input_tokens': args.max_input_tokens,
         'max_new_tokens': args.max_new_tokens, 'decoding': 'greedy',
+        'enable_thinking': args.enable_thinking,
         'examples': examples,
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode('utf-8')
@@ -257,6 +262,7 @@ def write_metrics(path, args, records):
         'dataset': args.data, 'examples': len(records), 'seed': args.seed,
         'max_input_tokens': args.max_input_tokens,
         'max_new_tokens': args.max_new_tokens, 'decoding': 'greedy',
+        'enable_thinking': args.enable_thinking,
         'rouge1_f1': sums['rouge1'] / len(records),
         'rouge2_f1': sums['rouge2'] / len(records),
         'rougeL_f1': sums['rougeL'] / len(records),
@@ -287,6 +293,8 @@ def main():
     p.add_argument('--kernel-backend', choices=['auto', 'raw', 'registered'], default='auto')
     p.add_argument('--trust-remote-code', action='store_true')
     p.add_argument('--unsloth-16bit', action='store_true', help='Unsloth backend: load a full-precision (bf16/fp16) base instead of NF4')
+    p.add_argument('--enable-thinking', action='store_true',
+                   help='Let thinking-capable chat templates reason before answering (off by default)')
     p.add_argument('--resume', action='store_true', help='Resume from per-example predictions JSONL')
     args = p.parse_args()
     if args.max_input_tokens < 1 or args.max_new_tokens < 1 or args.limit < 0:
@@ -319,7 +327,7 @@ def main():
             for i, (messages, reference) in enumerate(examples, 1):
                 if i in completed:
                     continue
-                prompt = build_prompt(tokenizer, messages)
+                prompt = build_prompt(tokenizer, messages, args.enable_thinking)
                 inputs = tokenizer(prompt, return_tensors='pt', truncation=True,
                                    max_length=args.max_input_tokens).to(device)
                 with torch.inference_mode():
