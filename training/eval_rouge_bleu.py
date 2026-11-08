@@ -66,6 +66,45 @@ def build_prompt(tokenizer, messages, enable_thinking=False):
     return prefix + '\nAssistant:'
 
 
+def adapter_uses_full_layout(adapter):
+    """True if the adapter was trained on the full (multimodal) model layout.
+
+    Module names differ between layouts ("model.language_model.layers.N" vs
+    "model.layers.N"), so the evaluation model must be built the same way
+    as the training model or the adapter cannot be matched to its layers.
+    """
+    if not adapter:
+        return False
+    path = Path(adapter)
+    cfg = json.loads((path / 'adapter_config.json').read_text())
+    names = list(cfg.get('modules', {}))
+    if not names:
+        weights = path / 'adapter_model.safetensors'
+        if weights.exists():
+            from safetensors import safe_open
+            with safe_open(str(weights), framework='pt') as f:
+                names = list(f.keys())
+        targets = cfg.get('target_modules')
+        if not names and isinstance(targets, list):
+            names = targets
+    return any('language_model' in n for n in names)
+
+
+def require_lora_loaded(model, adapter_path):
+    """PEFT only warns about missing adapter keys; an unloaded LoRA has B == 0."""
+    import torch
+    total = 0.0
+    count = 0
+    for name, param in model.named_parameters():
+        if 'lora_B' in name:
+            count += 1
+            total += float(param.detach().abs().sum())
+    if count == 0 or total == 0.0:
+        raise RuntimeError(f'LoRA weights from {adapter_path} were not loaded into the model '
+                           '(adapter key names do not match this model layout)')
+    print(f'LoRA: {count} lora_B tensors loaded (sum |B| = {total:.3e})', flush=True)
+
+
 def load_model(args):
     import torch
     if args.backend == 'cq':
@@ -75,7 +114,11 @@ def load_model(args):
         from kernel_backend import configure_backend
         from load_model import load_model as load_cq_model
         configure_backend(args.kernel_module, args.kernel_backend)
-        model = load_cq_model(args.model, text_only=True,
+        text_only = args.text_only
+        if text_only is None:
+            text_only = not adapter_uses_full_layout(args.adapter)
+        print(f'CQ layout: {"text-only" if text_only else "full model (as trained)"}', flush=True)
+        model = load_cq_model(args.model, text_only=text_only,
                               trust_remote_code=args.trust_remote_code)
     else:
         # Unsloth must be imported before transformers/peft.
@@ -130,6 +173,7 @@ def load_model(args):
         else:
             from peft import PeftModel
             model = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False)
+            require_lora_loaded(model, adapter_path)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or args.model,
                                                trust_remote_code=args.trust_remote_code)
@@ -197,7 +241,7 @@ def evaluation_signature(args, examples):
         'kernel_backend': args.kernel_backend, 'seed': args.seed,
         'max_input_tokens': args.max_input_tokens,
         'max_new_tokens': args.max_new_tokens, 'decoding': 'greedy',
-        'enable_thinking': args.enable_thinking,
+        'enable_thinking': args.enable_thinking, 'text_only': args.text_only,
         'examples': examples,
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode('utf-8')
@@ -293,6 +337,11 @@ def main():
     p.add_argument('--kernel-backend', choices=['auto', 'raw', 'registered'], default='auto')
     p.add_argument('--trust-remote-code', action='store_true')
     p.add_argument('--unsloth-16bit', action='store_true', help='Unsloth backend: load a full-precision (bf16/fp16) base instead of NF4')
+    layout = p.add_mutually_exclusive_group()
+    layout.add_argument('--text-only', dest='text_only', action='store_true', default=None,
+                        help='CQ backend: build the text-only model (default: match the adapter)')
+    layout.add_argument('--full-model', dest='text_only', action='store_false',
+                        help='CQ backend: build the full model, as train.py does by default')
     p.add_argument('--enable-thinking', action='store_true',
                    help='Let thinking-capable chat templates reason before answering (off by default)')
     p.add_argument('--resume', action='store_true', help='Resume from per-example predictions JSONL')
