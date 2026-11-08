@@ -4,6 +4,7 @@
 #   bash run_evals.sh                 # all four cases
 #   bash run_evals.sh cq_gcmp         # one case
 #   bash run_evals.sh cq_base nf4_base  # optional no-adapter baselines
+#   bash run_evals.sh bf16_gcmp bf16_lora  # 16-bit Unsloth runs (needs >= 80 GB GPU)
 #
 # Each case writes only into its own folder:
 #   eval/<case>/metrics.json        ROUGE/BLEU + run settings
@@ -30,6 +31,9 @@ CQ_GCMP=$ROOT/outputs/qwen38-27b-cq-4bit-alpaca-gcmp-v1
 NF4_GCMP=$ROOT/outputs/qwen38-27b-unsloth-nf4-alpaca-gcmp-v1/final_adapter
 CQ_LORA=/workspace/training-factory/outputs/qwen38-27b-cq-r32-comparison-v4
 NF4_LORA=/workspace/training-factory/outputs/qwen38-27b-unsloth-nf4-r32-v5/final_adapter
+BF16_MODEL=Qwen/Qwen3.8-27B      # 16-bit base used by run_unsloth_16bit.sh
+BF16_GCMP=$ROOT/outputs/qwen38-27b-unsloth-bf16-alpaca-gcmp-v1/final_adapter
+BF16_LORA=$ROOT/outputs/qwen38-27b-unsloth-bf16-r32-v1/final_adapter
 
 LIMIT=0              # 0 = full validation set (required for the answer key)
 MAX_NEW_TOKENS=256
@@ -46,6 +50,7 @@ run_case() {
   fi
   local extra=()
   [[ $backend == cq ]] && extra+=(--kernel-module cq.cq_kernels)
+  if [[ $backend == unsloth16 ]]; then backend=unsloth; extra+=(--unsloth-16bit); fi
   [[ -n $adapter ]] && extra+=(--adapter "$adapter")
   echo "== $name  backend=$backend  adapter=${adapter:-none}"
   ( cd "$ROOT" && python "$TRAINING/eval_rouge_bleu.py" \
@@ -69,6 +74,9 @@ declare -A CASES=(
   [cq_lora]="cq $CQ_MODEL $CQ_LORA"
   [nf4_gcmp]="unsloth $NF4_MODEL $NF4_GCMP"
   [nf4_lora]="unsloth $NF4_MODEL $NF4_LORA"
+  [bf16_gcmp]="unsloth16 $BF16_MODEL $BF16_GCMP"
+  [bf16_lora]="unsloth16 $BF16_MODEL $BF16_LORA"
+  [bf16_base]="unsloth16 $BF16_MODEL"
   [cq_base]="cq $CQ_MODEL"
   [nf4_base]="unsloth $NF4_MODEL"
 )
