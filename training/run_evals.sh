@@ -18,7 +18,8 @@ set -euo pipefail
 # ---------------------------------------------------------------- settings
 ROOT=/workspace/training-factory-gcmp
 TRAINING=$ROOT/training
-DATA=$TRAINING/examples/alpaca_val.jsonl
+VAL_TEXT=$TRAINING/examples/alpaca_val.jsonl  # training-format validation rows ({"text": ...})
+DATA=$ROOT/eval/alpaca_val_eval.jsonl         # prompt/reference form, created from VAL_TEXT if missing
 KEY=$ROOT/qa_extraction_indices.jsonl      # answer key (90 short-answer items)
 EVAL_DIR=$ROOT/eval
 
@@ -73,6 +74,11 @@ declare -A CASES=(
 )
 ORDER=(cq_gcmp cq_lora nf4_gcmp nf4_lora)
 [[ $# -gt 0 ]] && ORDER=("$@")
+
+if [[ ! -f $DATA ]]; then
+  mkdir -p "$(dirname "$DATA")"
+  python "$TRAINING/prepare_eval_data.py" "$VAL_TEXT" "$DATA"
+fi
 
 failed=()
 for name in "${ORDER[@]}"; do
