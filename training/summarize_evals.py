@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-ORDER = ["cq_base", "cq_lora", "cq_gcmp", "nf4_base", "nf4_lora", "nf4_gcmp"]
+ORDER = ["cq_base", "cq_lora", "cq_gcmp", "nf4_base", "nf4_lora", "nf4_gcmp", "bf16_base", "bf16_lora", "bf16_gcmp"]
 
 
 def finished_fraction(pred_path):
