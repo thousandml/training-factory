@@ -8,6 +8,7 @@ supported.
 from .cq import CqConfig, CqLinearMethod, configure_cq_pipeline_partition
 from . import runtime_ops as _runtime_ops  # registers FakeTensor metadata
 from .gcmp_adapter import swap_adapter, swap_adapter_llm  # GCMP adapter
+from . import gcmp_adapter as _gcmp_adapter
 
 
 def _separate_compile_cache_for_adapter() -> None:
@@ -23,14 +24,17 @@ def _separate_compile_cache_for_adapter() -> None:
     import os
     from pathlib import Path
 
-    path = os.environ.get("CQ_GCMP_ADAPTER", "").strip()
-    if not path or os.environ.get("CQ_GCMP_KEEP_CACHE_ROOT") == "1":
+    single = os.environ.get("CQ_GCMP_ADAPTER", "").strip()
+    multi = os.environ.get("CQ_GCMP_ADAPTERS", "").strip()
+    if not (single or multi) or os.environ.get("CQ_GCMP_KEEP_CACHE_ROOT") == "1":
         return
-    h = hashlib.sha256(path.encode())
-    cfg = Path(os.path.expanduser(path)) / "adapter_config.json"
-    if cfg.is_file():
-        h.update(cfg.read_bytes())
-    h.update(b"cq-gcmp-shim-v2")
+    h = hashlib.sha256(f"{single}|{multi}".encode())
+    paths = [single] if single else [item.split("=", 1)[-1].strip() for item in multi.split(",") if item.strip()]
+    for path in paths:
+        cfg = Path(os.path.expanduser(path)) / "adapter_config.json"
+        if cfg.is_file():
+            h.update(cfg.read_bytes())
+    h.update(b"cq-gcmp-shim-v3-multi")
     base = os.environ.get("VLLM_CACHE_ROOT") or os.path.join(
         os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "vllm")
     if os.path.basename(base).startswith("cq-gcmp-"):
@@ -41,6 +45,13 @@ def _separate_compile_cache_for_adapter() -> None:
 def register() -> None:
     """Register CQ with vLLM before EngineCore workers are spawned."""
     _separate_compile_cache_for_adapter()
+    try:
+        # Several GCMP adapters: model-name routing, validation, /v1/models,
+        # and prefix-cache keys per adapter (no-op without CQ_GCMP_ADAPTERS).
+        _gcmp_adapter.install_api_routing()
+    except Exception as exc:
+        print("[CQ-GCMP] multi-adapter routing setup failed:", repr(exc), flush=True)
+        raise
     try:
         configure_cq_pipeline_partition()
     except Exception as exc:
