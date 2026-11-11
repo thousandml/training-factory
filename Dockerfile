@@ -1,24 +1,48 @@
-# FROM vllm/vllm-openai:qwen38-flash-next
+
 FROM vllm/vllm-openai:v0.28.0-ubuntu2404
 
-COPY inference /tmp/inference
-
-RUN cd /tmp/inference && \
-    pip install --no-cache-dir --no-deps .
-
+# Inference-only dependencies.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git && \
     rm -rf /var/lib/apt/lists/*
 
-# RUN pip install --no-cache-dir --upgrade \
-#     git+https://github.com/huggingface/transformers.git
+# Install the CQ inference plugin and packaged native extensions.
+COPY inference /tmp/inference
 
-RUN ldd --version | head -1 && \
-    python3 -c "import cq; print('CQ import OK:', cq.__file__)" && \
-    python3 -c "import vllm; print('vLLM:', vllm.__version__, vllm.__file__)" 
-    #  && \
-    # python3 -c "from transformers import AutoConfig; c=AutoConfig.from_pretrained('thousandml/Qwen3.8-Flash-Next-CQ-4bit', trust_remote_code=True); print(type(c), c.model_type)"
+RUN python3 -m pip install --no-cache-dir --no-deps /tmp/inference
 
+# Validate the components that are actually needed for CQ inference.
+RUN python3 - <<'PY'
+import sys
+import torch
+import transformers
+import vllm
+import cq
+import cq.runtime_ops
+import cq.cq_kernels
+
+print("Python:", sys.version)
+print("PyTorch:", torch.__version__)
+print("CUDA runtime:", torch.version.cuda)
+print("Transformers:", transformers.__version__)
+print("vLLM:", vllm.__version__)
+print("CQ:", cq.__file__)
+print("CQ runtime:", cq.runtime_ops.__file__)
+print("CQ kernels:", cq.cq_kernels.__file__)
+PY
+
+# Check that CQ is registered with vLLM.
+RUN python3 - <<'PY'
+from vllm.model_executor.layers.quantization import get_quantization_config
+
+config = get_quantization_config("cq")
+print("CQ quantization registered:", config)
+PY
+
+# Enable WSL2 pinned-memory compatibility.
 ENV VLLM_WSL2_ENABLE_PIN_MEMORY=1
 
+EXPOSE 8000
+
+# Allow: docker run IMAGE vllm serve MODEL --quantization cq
 ENTRYPOINT []
