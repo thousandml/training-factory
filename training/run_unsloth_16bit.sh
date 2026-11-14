@@ -7,10 +7,10 @@
 # Needs a GPU with >= 80 GB: the 27B base alone is ~54 GB in bf16.
 set -euo pipefail
 
-ROOT=/workspace/training-factory-gcmp
+ROOT=${ROOT:-/workspace/training-factory-gcmp}
 cd "$ROOT"
 
-MODEL=Qwen/Qwen3.8-27B      # original 16-bit checkpoint
+MODEL=${MODEL:-Qwen/Qwen3.8-27B}     # original 16-bit checkpoint
 
 # Hyperparameters shared with the NF4 runs (data, steps, batch 2 x grad-accum 4,
 # LR 2e-5 linear, no warmup, no weight decay, seed). Every Unsloth optimization

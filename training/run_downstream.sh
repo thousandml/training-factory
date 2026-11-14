@@ -22,11 +22,11 @@ VAL_TEXT=$TRAINING/examples/alpaca_val.jsonl     # training-format validation ro
 VAL_CHAT=$EVAL_DIR/alpaca_val_eval.jsonl         # prompt/reference form (auto-created)
 KEY=$ROOT/qa_extraction_indices.jsonl            # 90-item answer key (optional)
 
-CQ_MODEL=/workspace/models/Qwen3.8-27B-CQ-4bit
-NF4_MODEL=unsloth/Qwen3.8-27B-unsloth-bnb-4bit
-BF16_MODEL=Qwen/Qwen3.8-27B
+CQ_MODEL=${CQ_MODEL:-/workspace/models/Qwen3.8-27B-CQ-4bit}
+NF4_MODEL=${NF4_MODEL:-unsloth/Qwen3.8-27B-unsloth-bnb-4bit}
+BF16_MODEL=${BF16_MODEL:-Qwen/Qwen3.8-27B}
 
-ADAPTERS=/workspace/adapters                     # copy the adapter folders here
+ADAPTERS=${ADAPTERS:-/workspace/adapters}                    # copy the adapter folders here
 CQ_LORA=$ADAPTERS/qwen38-27b-cq-r32-comparison-v4
 CQ_GCMP=$ADAPTERS/qwen38-27b-cq-4bit-alpaca-gcmp-v1
 NF4_LORA=$ADAPTERS/qwen38-27b-unsloth-nf4-r32-v5/final_adapter
