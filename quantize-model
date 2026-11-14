@@ -14,7 +14,7 @@ from lib.utils.cq_quantizer import CQModelWrapper
 
 
 def default_output_dir(model_name: str) -> Path:
-    root = Path(os.environ.get("CQ_OUTPUT_ROOT", "/mnt/d/quantized_models"))
+    root = Path(os.environ.get("CQ_OUTPUT_ROOT", "quantized_models")).expanduser()
     # return root / f"cq_{model_name.replace('/', '_')}"
     return root / f"{model_name.rstrip('/').split('/')[-1]}-CQ-4bit"
 
@@ -79,7 +79,7 @@ def main() -> None:
         "--output-dir",
         type=Path,
         default=None,
-        help="Output directory (default: $CQ_OUTPUT_ROOT/cq_<model>)",
+        help="Output directory (default: $CQ_OUTPUT_ROOT/<model>-CQ-4bit; CQ_OUTPUT_ROOT defaults to ./quantized_models)",
     )
     parser.add_argument("--device", default="cuda", help="Quantization device (default: cuda)")
     parser.add_argument("--quiet", action="store_true", help="Reduce per-target logging")

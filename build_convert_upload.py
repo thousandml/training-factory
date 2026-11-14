@@ -2184,8 +2184,10 @@ def main():
         default=None,
         help=(
             "Path to the existing quantized CQ model directory containing "
-            "config.json and quantization_data/. If omitted, use the legacy "
-            "/mnt/d/quantized_models/<model-name>-CQ-4bit location."
+            "config.json and quantization_data/ (the --output-dir given to "
+            "quantize-model). If omitted, use "
+            "$CQ_OUTPUT_ROOT/<model-name>-CQ-4bit, where CQ_OUTPUT_ROOT "
+            "defaults to ./quantized_models (same default as quantize-model)."
         ),
     )
     parser.add_argument(
@@ -2232,10 +2234,14 @@ def main():
         cq_dir = args.quantized_model_dir.expanduser().resolve()
     else:
         model_name = args.model.rstrip("/").split("/")[-1]
-        cq_dir = Path(f"/mnt/d/quantized_models/{model_name}-CQ-4bit").resolve()
+        root = Path(os.environ.get("CQ_OUTPUT_ROOT", "quantized_models")).expanduser()
+        cq_dir = (root / f"{model_name}-CQ-4bit").resolve()
 
     if not cq_dir.is_dir():
-        parser.error(f"Quantized model directory does not exist: {cq_dir}")
+        parser.error(
+            f"Quantized model directory does not exist: {cq_dir}. "
+            "Pass --quantized-model-dir with the --output-dir used for quantize-model."
+        )
     if not (cq_dir / "config.json").is_file():
         parser.error(f"Missing config.json in quantized model directory: {cq_dir}")
     if not (cq_dir / QUANT_DIR_NAME).is_dir():

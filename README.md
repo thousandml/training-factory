@@ -240,13 +240,21 @@ python training/compare_cases.py eval_downstream --output compare   # add more e
 
 [All models →](https://huggingface.co/thousandml)
 
-To quantize your own model:
+To quantize your own model, run two scripts from the repo root:
 
 ```bash
-./quantize-model YOUR_ORG/MODEL --output-dir ./quantized_models
+# 1. Quantize (calibration-free)
+./quantize-model YOUR_ORG/MODEL --output-dir ./models/MODEL-CQ-4bit
+
+# 2. Build the CQ checkpoint in that folder. --no-upload keeps it local.
+python build_convert_upload.py \
+  --model YOUR_ORG/MODEL \
+  --quantized-model-dir ./models/MODEL-CQ-4bit \
+  --repo-id YOUR_USERNAME/MODEL-CQ-4bit \
+  --no-upload
 ```
 
-Quantization is calibration-free.
+`./models/MODEL-CQ-4bit` is then ready for `--model` in training and for `vllm serve --quantization cq`. Without `--no-upload`, step 2 also uploads the checkpoint to `--repo-id` on Hugging Face, which needs `hf auth login` first. If step 2 fails after the shards are built, for example during the upload, rerun it with `--skip-convert` so it doesn't rebuild them.
 
 ## Limitations
 
