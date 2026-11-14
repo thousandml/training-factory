@@ -27,13 +27,18 @@ def summarize(run):
     steps = load_jsonl(run / 'comparison_steps.jsonl')
     cfg = json.loads((run / 'comparison_config.json').read_text()) if (run / 'comparison_config.json').exists() else {}
     bench = json.loads((run / 'benchmark.json').read_text()) if (run / 'benchmark.json').exists() else {}
-    train = {d['step']: d['loss'] for d in logs if 'loss' in d and 'eval_loss' not in d}
-    evals = [(d['step'], d['eval_loss']) for d in logs if 'eval_loss' in d]
+    train = {d['step']: d['loss'] for d in logs if 'step' in d and isinstance(d.get('loss'), (int, float))}
+    evals = [(d['step'], d['eval_loss']) for d in logs if 'step' in d and isinstance(d.get('eval_loss'), (int, float))]
 
     def mean(a, b):
         v = [train[s] for s in train if a <= s <= b]
         return st.mean(v) if v else None
-    times = [d['optimizer_step_seconds'] for d in steps[10:]] if steps else []
+    times = []
+    for d in steps[10:]:  # trainers name the per-step time differently
+        v = next((d[k] for k in ('optimizer_step_seconds', 'step_seconds', 'seconds', 'step_time', 'wall_seconds')
+                  if isinstance(d.get(k), (int, float))), None)
+        if v is not None:
+            times.append(v)
     return {
         'run': run.name,
         'adapter': cfg.get('adapter') or ('lora' if cfg.get('rank') else None),
