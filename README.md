@@ -4,8 +4,8 @@
 
 [Website](https://www.thousandml.com) · [Models](https://huggingface.co/thousandml) · [Issues](https://github.com/thousandml/training-factory/issues)
 
-- **GCMP**: a parameter-efficient adapter that replaces LoRA. It matches LoRA r=32 quality with **55× fewer trainable parameters**: 2.9M vs ~159M, and an ~11 MB adapter vs ~320 MB. It works on **full-precision (BF16/FP16) models** with no quantization, and on 4-bit bases.
-- **CQ** (optional): calibration-free 4-bit quantization. On Qwen3.8-27B it matches the full-precision model on downstream benchmarks, and the checkpoint is 18 GB.
+- **GCMP**: a parameter-efficient adapter that replaces LoRA. It matches LoRA r=32 on benchmarks with **55× fewer trainable parameters**: 2.9M vs ~159M, and an ~11 MB adapter vs ~320 MB. It works on **full-precision (BF16/FP16) models** with no quantization, and on 4-bit bases.
+- **CQ** (optional): calibration-free 4-bit quantization. On Qwen3.8-27B the CQ base model matches the full-precision model on downstream benchmarks, and the checkpoint is 18 GB.
 - **vLLM serving**: a CQ base model with one or many GCMP adapters, with the adapter chosen per request.
 
 ## Results (Qwen3.8-27B)
@@ -38,22 +38,26 @@ Questions per task: IFEval 200, GSM8K 300, SQuAD/ARC/WinoGrande/BoolQ 500, Hella
 
 </details>
 
-### GCMP vs LoRA r=32 on a full-precision base (no quantization)
+### After fine-tuning: GCMP vs LoRA r=32
 
-The base is the original BF16 Qwen3.8-27B. Both adapters were trained with Unsloth, using the same settings. This comparison involves no quantization, so it shows GCMP on its own.
+Every adapter was trained on Alpaca for 500 steps with the same settings (batch 2 × 4, length 512, LR 2e-5, seed 42). The BF16 and NF4 adapters were trained with Unsloth; the CQ adapter with Training Factory.
 
-| | Trainable params | Answer loss ↓ | GSM8K | SQuAD | BoolQ | ARC-C | MMLU | IFEval | TruthfulQA |
+| Base + adapter | Trainable params | Answer loss ↓ | GSM8K | SQuAD | BoolQ | ARC-C | MMLU | IFEval | TruthfulQA |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| No adapter | – | 1.678 | 0.683 | 0.746 | 0.874 | 0.588 | 0.839 | 0.805 | 0.542 |
-| LoRA r=32 | ~159M | 1.480 | 0.903 | 0.776 | 0.896 | 0.612 | 0.844 | 0.825 | 0.518 |
-| **GCMP** | **2.9M** | **1.471** | 0.890 | 0.760 | 0.892 | 0.618 | 0.846 | 0.815 | 0.514 |
+| BF16, no adapter | – | 1.678 | 0.683 | 0.746 | 0.874 | 0.588 | 0.839 | 0.805 | 0.542 |
+| BF16 + LoRA r=32 | ~159M | 1.480 | 0.903 | 0.776 | 0.896 | 0.612 | 0.844 | 0.825 | 0.518 |
+| **BF16 + GCMP** | **2.9M** | 1.471 | 0.890 | 0.760 | 0.892 | 0.618 | 0.846 | 0.815 | 0.514 |
+| NF4 + LoRA r=32 | ~159M | 1.464 | 0.793 | 0.748 | 0.880 | 0.608 | 0.840 | 0.835 | 0.528 |
+| **NF4 + GCMP** | **2.9M** | 1.458 | 0.833 | 0.756 | 0.878 | 0.618 | 0.837 | 0.840 | 0.522 |
+| **CQ + GCMP** | **2.9M** | 1.572 | 0.830 | 0.732 | 0.906 | 0.576 | 0.841 | 0.810 | 0.538 |
 
-- **GCMP vs LoRA**: no significant difference on any benchmark; McNemar p ≥ 0.2 on every right/wrong task.
-- **Loss**: GCMP's answer-token loss is slightly lower (−0.009, 95% CI [−0.010, −0.008]).
-- **Validation loss**: GCMP's is lower at all 10 checkpoints, on both BF16 (1.2385 vs 1.2434) and NF4 (1.2435 vs 1.2484) bases.
-- **Effect of fine-tuning**: both adapters raise GSM8K by about 21 points, and both lower TruthfulQA by about 2.5 points, which is typical of Alpaca tuning.
-
-**Pending:** benchmarks for LoRA and GCMP on CQ and NF4 bases. They will be added here when the runs finish.
+- **GCMP vs LoRA, BF16 base** (no quantization): no significant difference on any benchmark (McNemar p ≥ 0.2). GCMP's answer loss is slightly lower (−0.009, 95% CI [−0.010, −0.008]).
+- **GCMP vs LoRA, NF4 base:** GCMP is 4.0 points higher on GSM8K (p = 0.04), with no significant difference elsewhere and a slightly lower answer loss (−0.006).
+- **CQ + GCMP vs NF4 + GCMP:** tied on GSM8K (83.0 vs 83.3). CQ is higher on BoolQ (+2.8, p = 0.007) and lower on ARC-Challenge (−4.2, p = 0.001); its answer loss is higher (1.572 vs 1.458). The two used different trainers, so this compares the full stacks, not only the base formats.
+- **4-bit vs full precision after fine-tuning:** both NF4 + GCMP and CQ + GCMP are about 6 points below BF16 + GCMP on GSM8K (p ≈ 0.01). CQ's base-model lead over NF4 on GSM8K does not carry over after fine-tuning in this test.
+- **Effect of fine-tuning:** every adapter raises GSM8K by 18–27 points over its base. TruthfulQA drops by about 2.5 points on BF16 and NF4, a typical side effect of Alpaca tuning; CQ + GCMP shows no drop.
+- **CQ + LoRA is not reported.** The CQ + LoRA adapter we evaluated came from an earlier version of our trainer and degrades (it falls into repeated `###` output; GSM8K 44%). We're retraining it with the current trainer and will add it here.
+- **Validation loss during training:** GCMP's is lower than LoRA's at all 10 checkpoints, on both BF16 (1.2385 vs 1.2434) and NF4 (1.2435 vs 1.2484).
 
 ### Training speed and memory
 
@@ -269,7 +273,7 @@ python build_convert_upload.py \
 
   CQ MoE models use TP=1 with expert parallelism.
 - **What gets adapted:** MoE expert weights and non-CQ dense layers are not adapted.
-- **Benchmark scope:** results so far are for one model (Qwen3.8-27B) and one dataset (Alpaca), using the quick benchmark subset, which detects differences of about 5 points rather than 1. DROP is left out because its scores were invalid (about 0.02 for every model).
+- **Benchmark scope:** results so far are for one model (Qwen3.8-27B), one dataset (Alpaca) and one training run per case, using the quick benchmark subset, which detects differences of about 5 points rather than 1. DROP is left out because its scores were invalid (about 0.02 for every model).
 - **Your workload:** measure quality, speed and memory on your own data before relying on these numbers.
 
 ## Troubleshooting
