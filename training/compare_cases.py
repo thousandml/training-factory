@@ -38,7 +38,7 @@ PRIMARY = {  # task: (metric, filter or None, binary)
 }
 TASK_ORDER = list(PRIMARY)
 CASE_ORDER = ['cq_base', 'cq_lora', 'cq_gcmp', 'nf4_base', 'nf4_lora', 'nf4_gcmp',
-              'bf16_base', 'bf16_lora', 'bf16_gcmp']
+              'bf16_base', 'bf16_lora', 'bf16_gcmp', 'bf16_lora_r8', 'bf16_vera']
 PAIRS = [
     ('cq_gcmp', 'cq_lora'), ('nf4_gcmp', 'nf4_lora'), ('bf16_gcmp', 'bf16_lora'),
     ('cq_lora', 'cq_base'), ('cq_gcmp', 'cq_base'), ('nf4_lora', 'nf4_base'),
@@ -46,6 +46,8 @@ PAIRS = [
     ('cq_lora', 'nf4_lora'), ('cq_gcmp', 'nf4_gcmp'), ('cq_base', 'nf4_base'),
     ('cq_lora', 'bf16_lora'), ('cq_gcmp', 'bf16_gcmp'), ('cq_base', 'bf16_base'),
     ('nf4_lora', 'bf16_lora'), ('nf4_gcmp', 'bf16_gcmp'), ('nf4_base', 'bf16_base'),
+    ('bf16_gcmp', 'bf16_lora_r8'), ('bf16_gcmp', 'bf16_vera'), ('bf16_lora_r8', 'bf16_lora'),
+    ('bf16_lora_r8', 'bf16_base'), ('bf16_vera', 'bf16_base'),
 ]
 
 

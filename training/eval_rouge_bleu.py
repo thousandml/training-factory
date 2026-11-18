@@ -96,13 +96,13 @@ def require_lora_loaded(model, adapter_path):
     total = 0.0
     count = 0
     for name, param in model.named_parameters():
-        if 'lora_B' in name:
+        if 'lora_B' in name or 'vera_lambda_b' in name:
             count += 1
             total += float(param.detach().abs().sum())
     if count == 0 or total == 0.0:
         raise RuntimeError(f'LoRA weights from {adapter_path} were not loaded into the model '
                            '(adapter key names do not match this model layout)')
-    print(f'LoRA: {count} lora_B tensors loaded (sum |B| = {total:.3e})', flush=True)
+    print(f'PEFT adapter: {count} lora_B/vera_lambda_b tensors loaded (sum = {total:.3e})', flush=True)
 
 
 def load_model(args):

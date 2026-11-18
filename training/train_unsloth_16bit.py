@@ -47,7 +47,7 @@ def parse_args(argv=None, adapter=None):
     p.add_argument('--eval-data')
     p.add_argument('--output', required=True)
     if adapter is None:
-        p.add_argument('--adapter', choices=['lora', 'gcmp'], required=True)
+        p.add_argument('--adapter', choices=['lora', 'gcmp', 'vera'], required=True)
     p.add_argument('--dtype', choices=sorted(DTYPES), default=None,
                    help='default: bfloat16 if supported, else float16')
     p.add_argument('--targets', default=','.join(TARGETS))
@@ -71,6 +71,9 @@ def parse_args(argv=None, adapter=None):
     p.add_argument('--lora-alpha', type=int, default=32)
     p.add_argument('--lora-dropout', type=float, default=0.0)
     p.add_argument('--use-rslora', action='store_true')
+    # VeRA (PEFT): shared frozen random matrices + trainable scaling vectors
+    p.add_argument('--vera-rank', type=int, default=256)
+    p.add_argument('--vera-d-initial', type=float, default=0.1)
     # GCMP
     p.add_argument('--gcmp-scale', type=float, default=1.0)
     p.add_argument('--kernel-module', default='cq.cq_kernels',
@@ -125,6 +128,22 @@ def attach_lora(model, a):
     )
 
 
+def attach_vera(model, a):
+    """PEFT VeRA on the same language-model projections LoRA/GCMP train (vision tower excluded)."""
+    from peft import VeraConfig, get_peft_model
+    names = [n for n, m in model.named_modules()
+             if isinstance(m, torch.nn.Linear) and n.split('.')[-1] in a.targets
+             and not any(v in n for v in ('visual', 'vision'))]
+    if not names:
+        raise RuntimeError(f'No target projections {a.targets} found for VeRA')
+    cfg = VeraConfig(r=a.vera_rank, target_modules=names, vera_dropout=0.0,
+                     d_initial=a.vera_d_initial, projection_prng_key=a.seed,
+                     save_projection=True, bias='none')
+    model = get_peft_model(model, cfg)
+    model.print_trainable_parameters()
+    return model
+
+
 def main(argv=None, adapter=None):
     a = parse_args(argv, adapter)
     os.makedirs(a.output, exist_ok=True)
@@ -133,6 +152,8 @@ def main(argv=None, adapter=None):
     model, tokenizer = load_16bit(a)
     if a.adapter == 'lora':
         model = attach_lora(model, a)
+    elif a.adapter == 'vera':
+        model = attach_vera(model, a)
     else:
         model = attach_gcmp(model, tokenizer, a)
 
@@ -165,11 +186,13 @@ def main(argv=None, adapter=None):
         remove_unused_columns=False,
         # LoRA: Unsloth enables smart checkpointing in get_peft_model.
         # GCMP: same patch (attach_gcmp), enabled through the Trainer.
-        gradient_checkpointing=(a.adapter == 'gcmp'),
-        gradient_checkpointing_kwargs={'use_reentrant': False} if a.adapter == 'gcmp' else None,
+        gradient_checkpointing=(a.adapter in ('gcmp', 'vera')),
+        gradient_checkpointing_kwargs={'use_reentrant': False} if a.adapter in ('gcmp', 'vera') else None,
     )
     fields = ({'rank': a.lora_rank, 'alpha': a.lora_alpha, 'dropout': a.lora_dropout, 'rslora': a.use_rslora}
-              if a.adapter == 'lora' else {'gcmp_scale': a.gcmp_scale})
+              if a.adapter == 'lora' else
+              {'vera_rank': a.vera_rank, 'vera_d_initial': a.vera_d_initial} if a.adapter == 'vera' else
+              {'gcmp_scale': a.gcmp_scale})
     with open(os.path.join(a.output, 'comparison_config.json'), 'w', encoding='utf-8') as f:
         json.dump({'model': a.model, 'quantization': f'none ({a.dtype})', 'adapter': a.adapter,
                    'targets': a.targets, **fields, 'train_data': a.train_data, 'eval_data': a.eval_data,

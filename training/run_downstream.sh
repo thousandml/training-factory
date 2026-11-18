@@ -33,6 +33,8 @@ NF4_LORA=$ADAPTERS/qwen38-27b-unsloth-nf4-r32-v5/final_adapter
 NF4_GCMP=$ADAPTERS/qwen38-27b-unsloth-nf4-alpaca-gcmp-v1/final_adapter
 BF16_LORA=$ADAPTERS/qwen38-27b-unsloth-bf16-r32-v1/final_adapter
 BF16_GCMP=$ADAPTERS/qwen38-27b-unsloth-bf16-alpaca-gcmp-v1/final_adapter
+BF16_LORA8=${BF16_LORA8:-$ADAPTERS/qwen38-27b-unsloth-bf16-r8-v1/final_adapter}
+BF16_VERA=${BF16_VERA:-$ADAPTERS/qwen38-27b-unsloth-bf16-vera-v1/final_adapter}
 
 STAGES=${STAGES:-"loss gen tasks"}
 SUITE=${SUITE:-quick}            # quick | full
@@ -48,6 +50,7 @@ declare -A CASE=(
   [nf4_gcmp]="nf4|$NF4_MODEL|$NF4_GCMP"
   [bf16_base]="bf16|$BF16_MODEL|"     [bf16_lora]="bf16|$BF16_MODEL|$BF16_LORA"
   [bf16_gcmp]="bf16|$BF16_MODEL|$BF16_GCMP"
+  [bf16_lora_r8]="bf16|$BF16_MODEL|$BF16_LORA8"  [bf16_vera]="bf16|$BF16_MODEL|$BF16_VERA"
 )
 case ${1:-} in
   4bit) ORDER=(cq_base cq_lora cq_gcmp nf4_base nf4_lora nf4_gcmp) ;;
