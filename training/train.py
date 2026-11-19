@@ -144,9 +144,15 @@ def main():
                 messages = row.get('messages')
                 if not messages:
                     if isinstance(row.get('text'), str):
-                        messages = [{'role': 'user', 'content': row['text']}]
-                    else:
-                        raise ValueError('Each training row needs text or messages')
+                        # Plain-text rows train on the raw text plus EOS, exactly like the
+                        # text-only path and Unsloth/TRL SFT. (Wrapping them as a lone *user*
+                        # turn taught the model Alpaca "###" continuations in the wrong role
+                        # and never taught it to stop, which degraded generation.)
+                        text = row['text']
+                        eos = tokenizer.eos_token or ''
+                        prompts.append(text if not eos or text.endswith(eos) else text + eos)
+                        continue
+                    raise ValueError('Each training row needs text or messages')
                 row_images = []
                 for msg in messages:
                     content = msg.get('content', '')
