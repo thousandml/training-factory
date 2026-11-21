@@ -28,7 +28,7 @@ BF16_MODEL=${BF16_MODEL:-Qwen/Qwen3.8-27B}
 
 ADAPTERS=${ADAPTERS:-/workspace/adapters}                    # copy the adapter folders here
 CQ_LORA=$ADAPTERS/qwen38-27b-cq-r32-comparison-v4
-CQ_GCMP=$ADAPTERS/qwen38-27b-cq-4bit-alpaca-gcmp-v1
+CQ_GCMP=${CQ_GCMP:-$ADAPTERS/qwen38-27b-cq-4bit-alpaca-gcmp-v1}
 NF4_LORA=$ADAPTERS/qwen38-27b-unsloth-nf4-r32-v5/final_adapter
 NF4_GCMP=$ADAPTERS/qwen38-27b-unsloth-nf4-alpaca-gcmp-v1/final_adapter
 BF16_LORA=$ADAPTERS/qwen38-27b-unsloth-bf16-r32-v1/final_adapter

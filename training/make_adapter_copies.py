@@ -31,6 +31,7 @@ def main():
     p.add_argument('--rank', type=int, help='LoRA only: keep the first R ranks (sets r and lora_alpha to R)')
     p.add_argument('--noise', type=float, default=1e-3, help='relative per-copy perturbation')
     p.add_argument('--prefix', default=None)
+    p.add_argument('--seed-offset', type=int, default=0, help='use a different offset to get copies distinct from another set')
     a = p.parse_args()
 
     src = Path(a.src)
@@ -62,7 +63,7 @@ def main():
         name = f'{prefix}{i:04d}'
         d = out / name
         d.mkdir(exist_ok=True)
-        g = torch.Generator().manual_seed(i)
+        g = torch.Generator().manual_seed(a.seed_offset + i)
         copy = {}
         for k, t in tensors.items():
             if t.is_floating_point() and t.numel() > 0:
