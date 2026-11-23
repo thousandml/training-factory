@@ -243,8 +243,12 @@ def main():
     p.add_argument('--save-steps', type=int, default=100)
     p.add_argument('--benchmark-warmup-steps', type=int, default=10)
     p.add_argument('--adapter', choices=['lora', 'gcmp'], default='lora',
-                   help='lora: Unsloth LoRA r=32 (baseline); gcmp: GCMP adapter on the same NF4 base')
+                   help='lora: Unsloth LoRA (r=32 by default, the baseline); gcmp: GCMP adapter on the same NF4 base')
     p.add_argument('--learning-rate', type=float, default=2e-5)
+    p.add_argument('--lora-rank', type=int, default=32)
+    p.add_argument('--lora-alpha', type=int, default=None, help='default: same as --lora-rank')
+    p.add_argument('--batch-size', type=int, default=2)
+    p.add_argument('--grad-accum', type=int, default=4)
     p.add_argument('--gcmp-scale', type=float, default=1.0)
     p.add_argument('--kernel-module', default='cq.cq_kernels',
                    help='GCMP only: extension providing my_qlinear::gcmp_* (falls back to torch if absent)')
@@ -286,8 +290,8 @@ def main():
     if a.adapter == 'lora':
         model = FastModel.get_peft_model(
             model,
-            r=32,
-            lora_alpha=32,
+            r=a.lora_rank,
+            lora_alpha=a.lora_alpha or a.lora_rank,
             lora_dropout=0,
             target_modules=TARGETS,
             bias='none',
@@ -306,9 +310,9 @@ def main():
         dataset_text_field='text',
         max_length=a.max_length,
         packing=False,
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=4,
-        per_device_eval_batch_size=2,
+        per_device_train_batch_size=a.batch_size,
+        gradient_accumulation_steps=a.grad_accum,
+        per_device_eval_batch_size=a.batch_size,
         max_steps=a.max_steps,
         learning_rate=a.learning_rate,
         lr_scheduler_type='linear',
@@ -333,13 +337,13 @@ def main():
         gradient_checkpointing_kwargs={'use_reentrant': False} if a.adapter == 'gcmp' else None,
     )
     with open(os.path.join(a.output, 'comparison_config.json'), 'w', encoding='utf-8') as f:
-        lora_fields = ({'rank': 32, 'alpha': 32, 'dropout': 0} if a.adapter == 'lora'
+        lora_fields = ({'rank': a.lora_rank, 'alpha': a.lora_alpha or a.lora_rank, 'dropout': 0} if a.adapter == 'lora'
                        else {'rank': None, 'alpha': None, 'dropout': None, 'gcmp_scale': a.gcmp_scale})
         json.dump({'model': a.model, 'quantization': 'bnb_nf4_prequantized',
                    'adapter': a.adapter, 'targets': TARGETS, **lora_fields,
                    'train_data': a.train_data, 'eval_data': a.eval_data,
                    'max_length': a.max_length, 'seed': a.seed,
-                   'max_steps': a.max_steps, 'batch_size': 2, 'grad_accum': 4,
+                   'max_steps': a.max_steps, 'batch_size': a.batch_size, 'grad_accum': a.grad_accum,
                    'learning_rate': a.learning_rate, 'optimizer': 'adamw_torch',
                    'scheduler': 'linear', 'warmup_steps': 0, 'weight_decay': 0.0,
                    'eval_steps': a.eval_steps, 'save_steps': a.save_steps,
