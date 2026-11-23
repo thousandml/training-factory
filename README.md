@@ -1,84 +1,33 @@
 # Training Factory
 
-**Fine-tune open LLMs on your own GPUs with GCMP, an adapter that matches LoRA with 55× fewer parameters, on a full-precision base or a CQ 4-bit base.**
+**GCMP is a drop-in replacement for LoRA. It matches LoRA's accuracy with 14–55× fewer trainable parameters, and one GPU can serve 256 GCMP adapters as fast as it serves one.**
 
 [Website](https://www.thousandml.com) · [Models](https://huggingface.co/thousandml) · [Issues](https://github.com/thousandml/training-factory/issues)
 
-- **GCMP**: a parameter-efficient adapter that replaces LoRA. It matches LoRA r=32 on benchmarks with **55× fewer trainable parameters**: 2.9M vs ~159M, and an ~11 MB adapter vs ~320 MB. It works on **full-precision (BF16/FP16) models** with no quantization, and on 4-bit bases.
-- **CQ** (optional): calibration-free 4-bit quantization. On Qwen3.8-27B the CQ base model matches the full-precision model on downstream benchmarks, and the checkpoint is 18 GB.
-- **vLLM serving**: a CQ base model with one or many GCMP adapters, with the adapter chosen per request.
+Training Factory fine-tunes open LLMs on your own GPUs. It has three parts:
 
-## Results (Qwen3.8-27B)
+- **GCMP adapters.** 2.9M trainable parameters and an ~11 MB file for a 27B model. LoRA r=32 needs ~159M parameters and ~320 MB. GCMP works on full-precision (BF16/FP16) models and on 4-bit bases.
+- **CQ 4-bit quantization** (optional). It needs no calibration data. On Qwen3.8-27B, the CQ base matches the full-precision model on all 9 benchmarks we ran, in an 18 GB checkpoint.
+- **vLLM serving.** One CQ base serves many GCMP adapters. Each request picks its adapter, and requests for different adapters share a batch.
 
-The same evaluation code, prompts and questions were used for every row. Decoding is greedy. Significance comes from paired tests: an exact McNemar test for right/wrong tasks and a bootstrap for losses.
+## GCMP at a glance (Qwen3.8-27B)
 
-### 4-bit base quality: CQ matches BF16, NF4 does not
+| | GCMP | LoRA r=32 | LoRA r=8 |
+|---|---:|---:|---:|
+| Trainable parameters | **2.9M** | ~159M | ~40M |
+| Adapter file | **~11 MB** | ~320 MB | ~80 MB |
+| BF16 base: benchmark accuracy | tied | tied | tied |
+| BF16 base: held-out answer loss ↓ | **1.471** | 1.480 | 1.555 |
+| NF4 base: GSM8K | **83.3** | 79.3 | – |
+| 256 adapters on one A40: output tok/s | **~84** (same as 1 adapter) | can't start (host RAM) | 59.5 default, 74.4 tuned |
+| Swap one tenant for a new one, p50 | **0.43 s** | – | 5.4 s |
+| p99 time to first token, 256 tenants, long-tail traffic | **1.2 s** | – | 91 s |
 
-| Base model | GSM8K | SQuAD | BoolQ | ARC-C | MMLU | IFEval | HellaSwag | WinoGrande | TruthfulQA |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| BF16 (full precision) | 0.683 | 0.746 | 0.874 | 0.588 | 0.839 | 0.805 | 0.737 | 0.758 | 0.542 |
-| **CQ 4-bit** | 0.650 | **0.746** | **0.880** | **0.598** | **0.840** | **0.820** | 0.735 | **0.780** | 0.537 |
-| NF4 4-bit (bitsandbytes) | 0.563 | 0.716 | 0.852 | 0.582 | 0.839 | 0.825 | 0.736 | 0.770 | 0.550 |
-
-- **CQ vs BF16**: no significant difference on any task.
-- **NF4 vs BF16**: NF4 is 12.0 points lower on GSM8K (p = 3e-6).
-- **CQ vs NF4**: CQ is higher on GSM8K by 8.7 points (p = 0.0005) and on BoolQ by 2.8 points (p = 0.02).
-
-Questions per task: IFEval 200, GSM8K 300, SQuAD/ARC/WinoGrande/BoolQ 500, HellaSwag 1000, MMLU 1140, TruthfulQA 817.
-
-<details>
-<summary>Quantization fidelity on WikiText-2 (vs the full-precision model)</summary>
-
-| Metric | CQ 4-bit | NF4 (bitsandbytes) |
-|---|---:|---:|
-| Checkpoint size | **18 GB** | 22.4 GB |
-| Mean KL divergence ↓ | **0.0282** | 0.0330 |
-| 99th-percentile KL ↓ | **0.976** | 1.181 |
-| Top-1 agreement ↑ | **92.42%** | 91.95% |
-
-</details>
-
-### After fine-tuning: GCMP vs LoRA r=32
-
-Every adapter was trained on Alpaca for 500 steps with the same settings (batch 2 × 4, length 512, LR 2e-5, seed 42). The BF16 and NF4 adapters were trained with Unsloth; the CQ adapter with Training Factory.
-
-| Base + adapter | Trainable params | Answer loss ↓ | GSM8K | SQuAD | BoolQ | ARC-C | MMLU | IFEval | TruthfulQA |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| BF16, no adapter | – | 1.678 | 0.683 | 0.746 | 0.874 | 0.588 | 0.839 | 0.805 | 0.542 |
-| BF16 + LoRA r=32 | ~159M | 1.480 | 0.903 | 0.776 | 0.896 | 0.612 | 0.844 | 0.825 | 0.518 |
-| **BF16 + GCMP** | **2.9M** | 1.471 | 0.890 | 0.760 | 0.892 | 0.618 | 0.846 | 0.815 | 0.514 |
-| NF4 + LoRA r=32 | ~159M | 1.464 | 0.793 | 0.748 | 0.880 | 0.608 | 0.840 | 0.835 | 0.528 |
-| **NF4 + GCMP** | **2.9M** | 1.458 | 0.833 | 0.756 | 0.878 | 0.618 | 0.837 | 0.840 | 0.522 |
-| **CQ + GCMP** | **2.9M** | 1.572 | 0.830 | 0.732 | 0.906 | 0.576 | 0.841 | 0.810 | 0.538 |
-
-- **GCMP vs LoRA, BF16 base** (no quantization): no significant difference on any benchmark (McNemar p ≥ 0.2). GCMP's answer loss is slightly lower (−0.009, 95% CI [−0.010, −0.008]).
-- **GCMP vs LoRA, NF4 base:** GCMP is 4.0 points higher on GSM8K (p = 0.04), with no significant difference elsewhere and a slightly lower answer loss (−0.006).
-- **CQ + GCMP vs NF4 + GCMP:** tied on GSM8K (83.0 vs 83.3). CQ is higher on BoolQ (+2.8, p = 0.007) and lower on ARC-Challenge (−4.2, p = 0.001); its answer loss is higher (1.572 vs 1.458). The two used different trainers, so this compares the full stacks, not only the base formats.
-- **4-bit vs full precision after fine-tuning:** both NF4 + GCMP and CQ + GCMP are about 6 points below BF16 + GCMP on GSM8K (p ≈ 0.01). CQ's base-model lead over NF4 on GSM8K does not carry over after fine-tuning in this test.
-- **Effect of fine-tuning:** every adapter raises GSM8K by 18–27 points over its base. TruthfulQA drops by about 2.5 points on BF16 and NF4, a typical side effect of Alpaca tuning; CQ + GCMP shows no drop.
-- **CQ + LoRA is not reported.** The CQ + LoRA adapter we evaluated came from an earlier version of our trainer and degrades (it falls into repeated `###` output; GSM8K 44%). We're retraining it with the current trainer and will add it here.
-- **Validation loss during training:** GCMP's is lower than LoRA's at all 10 checkpoints, on both BF16 (1.2385 vs 1.2434) and NF4 (1.2435 vs 1.2484).
-
-### Training speed and memory
-
-All runs use Alpaca, 500 steps, batch 2 × gradient accumulation 4, sequence length 512.
-
-| Base + adapter | Trainer | GPU | s/step ↓ | Peak memory |
-|---|---|---|---:|---:|
-| CQ + LoRA r=32 | Training Factory | A40 48 GB | 8.6 | 23.5 GiB |
-| CQ + GCMP | Training Factory | A40 48 GB | 12.4 | 22.0 GiB |
-| NF4 + LoRA r=32 | Unsloth | A40 48 GB | **3.2** | 23.8 GiB |
-| NF4 + GCMP | Unsloth + GCMP | A40 48 GB | 5.6 | **21.5 GiB** |
-| BF16 + LoRA r=32 | Unsloth | 80 GB | **1.37** | 53.7 GiB |
-| BF16 + GCMP | Unsloth + GCMP | 80 GB | 2.74 | 51.7 GiB |
-
-Unsloth is still faster. GCMP currently costs about 2× the step time of LoRA, and kernel work to reduce that is in progress.
-
-> **About training-log losses:** the CQ trainer and Unsloth tokenize, mask and average loss differently, so their logged losses are not on the same scale. An earlier version of this README compared them directly (0.84 vs 1.25). Use the same-formula losses and the benchmarks above instead.
+Each row is explained, with significance tests, in [Results](#results). [Reproduce the benchmarks](#reproduce-the-benchmarks) has every command.
 
 ## Quick start
 
-**Requirements:** Linux x86-64 or WSL2, an NVIDIA GPU, Conda and Python 3.12. The native kernels ship compiled and need a ThousandML license check, which is free during early access.
+**Requirements:** Linux x86-64 or WSL2, an NVIDIA GPU, Conda and Python 3.12. The native kernels ship compiled and need a ThousandML license check. It's free during early access.
 
 ```bash
 git clone https://github.com/thousandml/training-factory.git
@@ -88,7 +37,7 @@ cd training-factory
 hf download thousandml/Qwen3.8-27B-CQ-4bit --local-dir ./models/Qwen3.8-27B-CQ-4bit
 ```
 
-**Train a GCMP adapter:**
+**Train a GCMP adapter** on the CQ base (fits a 48 GB GPU):
 
 ```bash
 python training/train.py \
@@ -115,9 +64,7 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '
 }'
 ```
 
-### Full precision, no quantization
-
-GCMP doesn't need CQ. To train it on the original 16-bit model (80 GB GPU for 27B; smaller models need less):
+**No quantization.** GCMP doesn't need CQ. To train on the original 16-bit model (27B needs an 80 GB GPU):
 
 ```bash
 python training/train_unsloth_16bit_gcmp.py \
@@ -125,9 +72,333 @@ python training/train_unsloth_16bit_gcmp.py \
   --train-data train.jsonl --output ./outputs/my-gcmp-bf16
 ```
 
-The evaluation scripts load the result in Transformers, for example `training/downstream_eval.py --backend unsloth --model Qwen/Qwen3.8-27B --adapter ./outputs/my-gcmp-bf16/final_adapter --output-dir eval/my-gcmp-bf16`. vLLM serving of GCMP adapters supports CQ bases only for now.
+**On your own cloud account** (AWS, GCP, Azure, RunPod, Lambda, Kubernetes and others), the `thousandml` CLI trains and serves with one command. See [docs/CLOUD.md](docs/CLOUD.md).
 
-## Training
+## Results
+
+### Setup
+
+All accuracy results use the same model, data, evaluation code, prompts and questions. Differences come only from the base model and the adapter.
+
+| | |
+|---|---|
+| Model | Qwen3.8-27B |
+| Bases | BF16 (no quantization); NF4 (bitsandbytes, Unsloth's prequantized checkpoint); CQ 4-bit |
+| Adapters | GCMP; LoRA r=32; LoRA r=8; VeRA r=256. All of them adapt the same 7 projections: q, k, v, o, gate, up and down |
+| Training | Alpaca, 500 steps, batch 2 × gradient accumulation 4, length 512, LR 2e-5, seed 42 |
+| Trainers | Unsloth for BF16 and NF4; Training Factory for CQ |
+| Benchmarks | lm-evaluation-harness, greedy decoding, thinking off. GSM8K 300 questions, IFEval 200, SQuAD / ARC-Challenge / WinoGrande / BoolQ 500 each, HellaSwag 1,000, MMLU 1,140, TruthfulQA MC2 817 |
+| Loss | Per-token loss on 2,600 held-out Alpaca rows, with the same tokenizer and formula for every case. *Answer loss* counts response tokens only |
+| Statistics | Paired exact McNemar test per benchmark; paired bootstrap 95% CI for losses. At these sample sizes, differences of about 5 points are detectable and differences of 1 point are not |
+
+### 1. GCMP vs LoRA and VeRA, full-precision base
+
+On the BF16 base, GCMP, LoRA r=32, LoRA r=8 and VeRA are tied on all 9 benchmarks, and GCMP has the lowest held-out loss.
+
+| Benchmark | BF16 base | LoRA r=32 | LoRA r=8 | VeRA | **GCMP** |
+|---|---:|---:|---:|---:|---:|
+| Trainable params | – | 159M | 40M | 2.89M | **2.9M** |
+| GSM8K | 68.3 | 90.3 | 91.0 | 90.3 | 89.0 |
+| IFEval | 80.5 | 82.5 | 79.5 | 82.0 | 81.5 |
+| SQuAD completion | 74.6 | 77.6 | 76.8 | 77.8 | 76.0 |
+| ARC-Challenge | 58.8 | 61.2 | 62.0 | 61.0 | 61.8 |
+| HellaSwag | 73.7 | 73.7 | 73.7 | 73.4 | 73.8 |
+| WinoGrande | 75.8 | 77.0 | 75.6 | 77.4 | 76.0 |
+| BoolQ | 87.4 | 89.6 | 90.2 | 89.8 | 89.2 |
+| MMLU | 83.9 | 84.4 | 84.6 | 84.6 | 84.6 |
+| TruthfulQA MC2 | 54.2 | 51.8 | 52.8 | 52.0 | 51.4 |
+| Answer loss ↓ | 1.678 | 1.480 | 1.555 | 1.489 | **1.471** |
+| Final validation loss ↓ | – | 1.2434 | 1.2579 | 1.2488 | **1.2385** |
+
+- **GCMP vs LoRA r=32:** no significant difference on any benchmark (smallest p = 0.22). GCMP's answer loss is lower by 0.009, and the 95% CI excludes zero. Its validation loss was lower at all 10 checkpoints.
+- **GCMP vs LoRA r=8:** no significant difference (smallest p = 0.13). LoRA r=8 and r=32 are also tied, so the fair size comparison is with r=8: GCMP uses about 14× fewer parameters.
+- **GCMP vs VeRA:** no significant difference (smallest p = 0.15). VeRA is the closest alternative, with the same size and quality, and it currently trains 2× faster. vLLM can't serve VeRA adapters, though.
+- **Every adapter vs the base:** GSM8K rises by 21–23 points (p < 1e-10). TruthfulQA drops by 1.4–2.8 points for every adapter, which is an effect of Alpaca training rather than of any one adapter.
+
+### 2. GCMP on 4-bit bases
+
+| Benchmark | NF4 base | NF4 + LoRA r=32 | **NF4 + GCMP** | CQ base | **CQ + GCMP** |
+|---|---:|---:|---:|---:|---:|
+| GSM8K | 56.3 | 79.3 | **83.3** | 65.0 | 82.7 |
+| IFEval | 82.5 | 83.5 | 84.0 | 82.0 | 79.0 |
+| SQuAD completion | 71.6 | 74.8 | 75.6 | 74.6 | 75.6 |
+| ARC-Challenge | 58.2 | 60.8 | 61.8 | 59.8 | 62.0 |
+| HellaSwag | 73.6 | 73.4 | 73.3 | 73.5 | 73.1 |
+| WinoGrande | 77.0 | 76.6 | 76.8 | 78.0 | 77.2 |
+| BoolQ | 85.2 | 88.0 | 87.8 | 88.0 | 90.4 |
+| MMLU | 83.9 | 84.0 | 83.7 | 84.0 | 84.0 |
+| TruthfulQA MC2 | 55.0 | 52.8 | 52.2 | 53.7 | 52.7 |
+| Answer loss ↓ | 1.654 | 1.464 | **1.458** | 1.669 | 1.503 |
+
+- **NF4 base, GCMP vs LoRA r=32:** GCMP is 4.0 points higher on GSM8K (p = 0.043), and the two are tied everywhere else (p ≥ 0.36). GCMP also has the lower answer and validation loss.
+- **CQ + GCMP vs the CQ base:** GSM8K +17.7 (p = 6e-10).
+- **CQ + GCMP vs NF4 + GCMP:** tied on GSM8K (82.7 vs 83.3, p = 0.89). CQ is 2.6 points higher on BoolQ (p = 0.015) and 5.0 points lower on IFEval (p = 0.053, borderline). These two use different trainers, so this compares the full stacks, not only the base formats.
+- **4-bit vs full precision after GCMP:** NF4 + GCMP and CQ + GCMP are both about 6 points below BF16 + GCMP on GSM8K (p ≈ 0.01). CQ's base-model lead over NF4 does not carry over after fine-tuning in this test.
+- **CQ + LoRA:** an earlier trainer version produced a broken adapter, so no result is reported here yet. A retrained adapter from the current trainer is being evaluated now.
+
+### 3. Serving many adapters on one GPU
+
+The setup is one A40 48 GB, vLLM, the CQ base and 32 concurrent requests. Every request picks a random adapter, so each batch mixes tenants. The adapters are perturbed copies of a trained adapter.
+
+| Setup | Adapters | GPU adapter slots | p95 TTFT (s) | p95 latency (s) | KV cache (tokens) | Ready to serve |
+|---|---:|---:|---:|---:|---:|---:|
+| **GCMP** | 256 | all resident | **2.18** | **49.0** | **72,362** | **~6 min** |
+| LoRA r=8, tuned | 256 | 64 | 2.38 | 53.9 | 43,349 | ~41 min |
+| LoRA r=8, default | 256 | 16 | 47.5 | 93.4 | 88,064 | ~30 min |
+| LoRA r=32, default | 64 | 16 | 53.1 | 105.4 | 43,349 | ~18 min |
+| LoRA r=32, 32 slots | 64 | 32 | – | – | −1.42 GiB | never starts |
+| LoRA r=32, default | 256 | 16 | – | – | – | runs out of host RAM |
+| Base, no adapter | – | – | 1.55 | 44.0 | 111,274 | – |
+
+- **GCMP throughput is flat** at about 84 output tok/s from 1 to 256 adapters, with no tuning.
+- **Default multi-LoRA** (r=8) falls to about 60 tok/s by 64 adapters. Raising it to 64 GPU slots recovers 74 tok/s, but the slots take memory up front and the KV cache drops from 88k to 43k tokens.
+- **LoRA r=32** can't run 32 slots on a 48 GB GPU. With 256 adapters it needs about 82 GB of host RAM, because vLLM keeps every registered adapter in CPU memory; 256 GCMP adapters take about 3 GB.
+- **Startup:** vLLM registers LoRA adapters one at a time, about 6 s each at r=8 and about 18 s at r=32.
+- **With a single adapter,** LoRA is about 9% faster than GCMP (91 vs 83 tok/s).
+
+### 4. Tenant turnover over 45 minutes
+
+This test uses the same GPU and base. Open-loop Poisson traffic runs at 0.45 req/s with 128 output tokens, for 45 minutes per run. LoRA r=8 gets 64 GPU slots and 64 adapters cached in host RAM.
+
+- **Skew:** 256 adapters with Zipf(1.1) popularity: a few busy tenants and a long tail of rare ones.
+- **Churn:** 64 adapters. Every 20 s, one tenant leaves and a new one takes its place, after the slot has been drained. LoRA uses vLLM's runtime unload/load API. GCMP replaces the adapter in place.
+
+| Metric | GCMP skew | LoRA r=8 skew | GCMP churn | LoRA r=8 churn |
+|---|---:|---:|---:|---:|
+| Requests ok / failed | 1,219 / 0 | 1,218 / 1 | 1,386 / 0 | 1,352 / 2 |
+| TTFT p50 / p99 (s) | **0.70 / 1.18** | 6.90 / 91.1 | **0.82 / 1.25** | 7.26 / 56.9 |
+| TTFT p99, rarest half of tenants (s) | **1.17** | 92.8 | **1.24** | 56.3 |
+| Latency p99 (s) | **48.5** | 162.7 | **50.0** | 112.1 |
+| Swap time p50 / p95 (s) | – | – | **0.43 / 0.72** | 5.39 / 11.8 |
+| New tenant's first request, TTFT p95 (s) | – | – | **1.21** | 41.4 |
+| KV cache usage, max | 62% | 98% | 56% | 98% |
+| GPU memory drift over 45 min | +3 MB | +6 MB | 0 | +3 MB |
+
+Most of LoRA's latency comes from capacity. Its GPU slots shrink the KV cache to 43k tokens, which sat about 98% full, so busy tenants waited as long as rare ones. Neither system showed memory leaks or fragmentation.
+
+### 5. The CQ base model
+
+| Base model | GSM8K | IFEval | SQuAD | ARC-C | BoolQ | MMLU | HellaSwag | WinoGrande | TruthfulQA |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| BF16 (full precision) | 68.3 | 80.5 | 74.6 | 58.8 | 87.4 | 83.9 | 73.7 | 75.8 | 54.2 |
+| **CQ 4-bit** | 65.0 | 82.0 | 74.6 | 59.8 | 88.0 | 84.0 | 73.5 | 78.0 | 53.7 |
+| NF4 4-bit | 56.3 | 82.5 | 71.6 | 58.2 | 85.2 | 83.9 | 73.6 | 77.0 | 55.0 |
+
+- **CQ vs BF16:** no significant difference on any benchmark.
+- **NF4 vs BF16:** NF4 is 12.0 points lower on GSM8K (p = 3e-6) and 3.0 points lower on SQuAD (p = 0.049).
+- **CQ vs NF4:** CQ is 8.7 points higher on GSM8K (p = 0.0005) and 2.8 points higher on BoolQ (p = 0.02).
+
+| Fidelity vs BF16 (WikiText-2) | CQ 4-bit | NF4 |
+|---|---:|---:|
+| Checkpoint size | **18 GB** | 22.4 GB |
+| Mean KL divergence ↓ | **0.0282** | 0.0330 |
+| 99th-percentile KL ↓ | **0.976** | 1.181 |
+| Top-1 agreement ↑ | **92.42%** | 91.95% |
+
+### 6. Training speed and memory
+
+All runs: 500 steps, batch 2 × 4, length 512.
+
+| Base + adapter | Trainer | GPU | s/step ↓ | Peak memory |
+|---|---|---|---:|---:|
+| BF16 + LoRA r=32 | Unsloth | 80 GB | 1.37 | 53.7 GiB |
+| BF16 + LoRA r=8 | Unsloth | 80 GB | **1.31** | 52.0 GiB |
+| BF16 + VeRA | Unsloth | 80 GB | 1.33 | 51.4 GiB |
+| BF16 + GCMP | Unsloth + GCMP | 80 GB | 2.74 | 51.7 GiB |
+| NF4 + LoRA r=32 | Unsloth | A40 48 GB | **3.20** | 23.8 GiB |
+| NF4 + GCMP | Unsloth + GCMP | A40 48 GB | 5.60 | **21.5 GiB** |
+| CQ + LoRA r=32 | Training Factory | A40 48 GB | 7.07 | 24.4 GiB |
+| CQ + GCMP | Training Factory | A40 48 GB | 9.05 | 22.0 GiB |
+
+GCMP uses the least memory on each base but currently takes about 2× LoRA's step time. Kernel work to close that gap is in progress. The CQ trainer is slower than Unsloth.
+
+> **About losses in training logs:** the CQ trainer and Unsloth tokenize, mask and average the loss differently, so their logged losses aren't on the same scale. To compare runs, use the same-formula losses and the benchmarks above.
+
+## Reproduce the benchmarks
+
+Every number above comes from the scripts in `training/`. The steps below run them in order.
+
+| Step | What it produces | GPU | Rough time |
+|---|---|---|---|
+| 1. Setup | environment, models | any | 30 min |
+| 2. Train 9 adapters | `outputs/` | 48 GB for 4-bit, 80 GB for BF16 | 25–75 min per adapter |
+| 3. Downstream evaluation | `eval_downstream/<case>/` | 48 GB for 4-bit, 80 GB for BF16 | a few hours per case; CQ is the slowest |
+| 4. Comparison report | `report/compare.md`, `report/training.md` | none | 1 min |
+| 5. Serving scaling benchmark | `scaling/results/summary.md` | 48 GB | several hours (mostly LoRA startup) |
+| 6. Turnover benchmark | `scaling/turnover/summary.md` | 48 GB | ~5 h |
+
+Sections 1, 2, 5 and 6 of the results ran on RunPod A40 48 GB machines; the BF16 runs used A100/H100 80 GB GPUs.
+
+### Step 1. Setup (on every machine)
+
+```bash
+git clone https://github.com/thousandml/training-factory.git
+cd training-factory
+./install.sh
+bash training/setup_eval_machine.sh            # lm-evaluation-harness and eval dependencies
+
+# The CQ base. NF4 (unsloth/Qwen3.8-27B-unsloth-bnb-4bit) and BF16 (Qwen/Qwen3.8-27B)
+# are downloaded from Hugging Face automatically when first used.
+hf download thousandml/Qwen3.8-27B-CQ-4bit --local-dir ./models/Qwen3.8-27B-CQ-4bit
+
+# Every script below reads these
+export ROOT=$PWD
+export ADAPTERS=$PWD/outputs
+export CQ_MODEL=$PWD/models/Qwen3.8-27B-CQ-4bit
+```
+
+Check that the kernels load before you start a long run:
+
+```bash
+python -c "import torch, cq.cq_kernels; print('CUDA:', torch.cuda.is_available())"
+```
+
+### Step 2. Train the adapters
+
+All runs use `training/examples/alpaca_train.jsonl` and `training/examples/alpaca_val.jsonl`, 500 steps, batch 2 × gradient accumulation 4, length 512, LR 2e-5 and seed 42. Keep the output folder names: the evaluation script looks for adapters under these names.
+
+**CQ base, 48 GB GPU** (Training Factory):
+
+```bash
+COMMON="--model $CQ_MODEL \
+  --data training/examples/alpaca_train.jsonl --eval-data training/examples/alpaca_val.jsonl \
+  --kernel-module cq.cq_kernels --targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
+  --batch-size 2 --grad-accum 4 --max-length 512 --max-steps 500 --learning-rate 2e-5 \
+  --seed 42 --eval-steps 50 --comparison-logs --benchmark --benchmark-warmup-steps 10"
+
+python training/train.py $COMMON --adapter gcmp --gcmp-scale 1.0 \
+  --output ./outputs/qwen38-27b-cq-gcmp-v2-fix
+
+python training/train.py $COMMON --adapter lora --rank 32 --alpha 32 --lora-dropout 0 \
+  --output ./outputs/qwen38-27b-cq-r32-v8-fix
+```
+
+**NF4 base, 48 GB GPU** (Unsloth):
+
+```bash
+NF4="--model unsloth/Qwen3.8-27B-unsloth-bnb-4bit \
+  --train-data training/examples/alpaca_train.jsonl --eval-data training/examples/alpaca_val.jsonl \
+  --max-steps 500 --max-length 512 --eval-steps 50 --save-steps 100 --seed 42 --benchmark-warmup-steps 10"
+
+python training/train_unsloth_nf4.py $NF4 --adapter gcmp --output ./outputs/qwen38-27b-unsloth-nf4-alpaca-gcmp-v1
+python training/train_unsloth_nf4.py $NF4 --adapter lora --output ./outputs/qwen38-27b-unsloth-nf4-r32-v5
+```
+
+**BF16 base, 80 GB GPU** (Unsloth). This trains LoRA r=32, LoRA r=8, VeRA and GCMP with identical settings:
+
+```bash
+VERA_LR=<lr> bash training/run_unsloth_16bit.sh              # all four
+bash training/run_unsloth_16bit.sh gcmp lora                  # or selected ones: lora | lora8 | vera | gcmp
+```
+
+Each run saves `comparison_config.json` (every setting used), `comparison_summary.json` (step time, peak memory) and validation losses by step.
+
+If you train on one machine and evaluate on another, copy the whole adapter folders into `$ADAPTERS` on the evaluation machine with the same names.
+
+### Step 3. Evaluate
+
+```bash
+bash training/run_downstream.sh 4bit    # 48 GB GPU: cq_base cq_lora cq_gcmp nf4_base nf4_lora nf4_gcmp
+bash training/run_downstream.sh bf16    # 80 GB GPU: bf16_base bf16_lora bf16_lora_r8 bf16_vera bf16_gcmp
+
+bash training/run_downstream.sh 4bit cq_gcmp nf4_gcmp     # selected cases only
+SUITE=full bash training/run_downstream.sh 4bit           # every question instead of the subset above
+```
+
+Each case runs three stages and saves them in `eval_downstream/<case>/`:
+
+| Stage | Output | What it is |
+|---|---|---|
+| `loss` | `loss.json` | same-formula text loss and answer loss on 2,600 held-out rows |
+| `gen` | `metrics.json`, `predictions.jsonl` | generated answers, ROUGE/BLEU and a 90-item answer key |
+| `tasks` | `tasks/<task>.json` | the lm-evaluation-harness benchmarks |
+
+A stage that already finished is skipped, so you can rerun the same command after an interruption.
+
+**Make sure each case is using the right adapter.** Each run writes a `== <case>  base=...  adapter=...` line to `eval_downstream/<case>/run.log`, and the script stops a case whose adapter folder doesn't exist. If you named a folder differently, point the script at it with `CQ_LORA`, `CQ_GCMP`, `NF4_LORA`, `NF4_GCMP`, `BF16_LORA`, `BF16_LORA8`, `BF16_VERA` or `BF16_GCMP`:
+
+```bash
+CQ_GCMP=/path/to/my-cq-gcmp bash training/run_downstream.sh 4bit cq_gcmp
+```
+
+To rerun a case from scratch (for example, after replacing its adapter), move its folder away first: `mv eval_downstream/cq_lora eval_downstream/cq_lora_old`.
+
+Quick health checks while it runs:
+
+```bash
+tail -f eval_downstream/<case>/run.log
+cat eval_downstream/<case>/loss.json           # adapters land at about 1.46–1.56 answer loss; bases at about 1.65–1.68
+grep -c '###' eval_downstream/<case>/predictions.jsonl   # should be close to 0; a large count means broken outputs
+```
+
+### Step 4. Build the report
+
+On one machine:
+
+```bash
+python training/compare_cases.py eval_downstream --output report
+```
+
+Across machines, pack the results on each one (no weights or checkpoints), copy the archives to one place, and combine them:
+
+```bash
+NAME=gpu40 bash training/collect_results.sh      # on the 48 GB machine -> results_gpu40_<date>.tar.gz
+NAME=gpu80 bash training/collect_results.sh      # on the 80 GB machine -> results_gpu80_<date>.tar.gz
+
+bash training/report_all.sh results_gpu40_*.tar.gz results_gpu80_*.tar.gz
+```
+
+| File | Contents | README section |
+|---|---|---|
+| `report/compare.md` | a table per case; paired GCMP vs LoRA/VeRA, adapter vs base and CQ vs NF4 vs BF16 tests, with McNemar p-values and bootstrap CIs | 1, 2, 5 |
+| `report/training.md` | every training run: validation loss by step, s/step, peak memory | 6 |
+
+[`training/DOWNSTREAM_EVAL.md`](training/DOWNSTREAM_EVAL.md) explains every metric.
+
+### Step 5. Serving scaling benchmark
+
+This needs one 48 GB GPU, the CQ base, one trained GCMP adapter and one trained CQ LoRA r=32 adapter. The script makes 256 perturbed copies of each; the r=8 copies are the r=32 adapter cut to rank 8. Speed doesn't depend on the adapter's values, so any trained adapter works.
+
+```bash
+# prompt file (also created by step 3)
+mkdir -p eval_downstream
+python training/prepare_eval_data.py training/examples/alpaca_val.jsonl eval_downstream/alpaca_val_eval.jsonl
+
+export MODEL=$CQ_MODEL WORK=$PWD/scaling
+export GCMP_SRC=$ADAPTERS/qwen38-27b-cq-gcmp-v2-fix
+export LORA_SRC=$ADAPTERS/qwen38-27b-cq-r32-v8-fix
+
+bash training/run_adapter_scaling.sh                          # base, GCMP, LoRA r=32 and r=8 at 1/16/64/256 adapters
+CONFIGS="gcmp lora8" NS="64 256" bash training/run_adapter_scaling.sh   # a subset
+```
+
+The script sweeps vLLM's `--max-loras` (GPU slots) at the largest adapter count: `SWEEP8="32 64"` for r=8 and `SWEEP32="32"` for r=32. The results go to `scaling/results/summary.md` (tok/s, latency, TTFT and KV cache size), with one JSON per case and the server log next to each. Registering 256 LoRA adapters can take 30–40 minutes, so the script waits up to 90 minutes for the server (`WAIT_TRIES`, in 10-second steps).
+
+**Host RAM:** 256 LoRA r=32 adapters need about 82 GB of host RAM. On a pod with a lower memory limit (`cat /sys/fs/cgroup/memory.max`), that case stalls part way through registration.
+
+### Step 6. Turnover benchmark
+
+Run this on the same machine and settings as step 5. It reuses the adapter copies from step 5 when they exist.
+
+```bash
+bash training/run_turnover.sh                                 # GCMP and LoRA r=8, skew and churn, 45 min each (~5 h)
+KINDS="gcmp" MODES="churn" bash training/run_turnover.sh      # one case
+DURATION=600 bash training/run_turnover.sh                    # 10-minute smoke test
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `DURATION` | 2700 | seconds per run |
+| `RATE` | 0.45 | requests per second (open-loop Poisson) |
+| `ZIPF` | 1.1 | tenant popularity skew |
+| `SKEW_N` / `CHURN_N` | 256 / 64 | adapters in the skew / churn runs |
+| `CHURN_EVERY` | 20 | seconds between tenant swaps |
+| `LORA_CPU` | 64 | LoRA adapters cached in host RAM |
+| `LORA_SLOTS8` / `LORA_SLOTS32` | 64 / 16 | LoRA GPU slots |
+
+The results go to `scaling/turnover/summary.md`, with `result.json` and the raw per-request data for each run. The script samples GPU memory, KV cache usage and host memory every 5 s. LoRA swaps use vLLM's runtime adapter API (`VLLM_ALLOW_RUNTIME_LORA_UPDATING`). GCMP swaps go through `training/gcmp_swap_ext.py`, which the script loads as a vLLM worker extension.
+
+## Training options
 
 Training data is JSONL, with either plain text or chat messages:
 
@@ -142,7 +413,7 @@ Training data is JSONL, with either plain text or chat messages:
 | `--targets` | all attention + MLP projections | comma-separated projection names |
 | `--rank`, `--alpha`, `--lora-dropout` | 16, 32, 0.05 | LoRA only |
 | `--gcmp-scale` | 1.0 | GCMP output scale |
-| `--learning-rate` | 2e-4 | |
+| `--learning-rate` | 2e-4 | the benchmarks used 2e-5 |
 | `--batch-size`, `--grad-accum` | | effective batch = product |
 | `--max-length`, `--max-steps` / `--epochs` | | |
 | `--eval-data`, `--eval-steps` | | validation loss during training |
@@ -150,22 +421,29 @@ Training data is JSONL, with either plain text or chat messages:
 
 Run `python training/train.py --help` for every option. Adapters are saved on their own (`adapter_config.json` and `adapter_model.safetensors`). Don't merge them into the CQ base.
 
-GCMP also works on non-CQ bases through Unsloth: `training/train_unsloth_16bit_gcmp.py` for full-precision BF16/FP16 models, and `training/train_unsloth_nf4.py --adapter gcmp` for NF4.
+GCMP also trains on non-CQ bases through Unsloth: `training/train_unsloth_16bit_gcmp.py` for BF16/FP16 and `training/train_unsloth_nf4.py --adapter gcmp` for NF4. The evaluation scripts load those adapters in Transformers, for example `python training/downstream_eval.py --backend unsloth --model Qwen/Qwen3.8-27B --adapter ./outputs/my-gcmp-bf16/final_adapter --output-dir eval/my-gcmp-bf16`.
 
 ## Serving
 
 **One adapter:** set `CQ_GCMP_ADAPTER`, as in the quick start. `CQ_GCMP_ADAPTER_SCALE` overrides the adapter's scale.
 
-**Several adapters on one server (new; please report issues):**
+**Many adapters on one server:**
 
 ```bash
 CQ_GCMP_ADAPTERS="support=./outputs/support,sql=./outputs/sql" \
 vllm serve ./models/Qwen3.8-27B-CQ-4bit --quantization cq
 ```
 
-Pick an adapter per request by model name (`"model": "sql"`), or keep the base model name and pass `"vllm_xargs": {"gcmp_adapter": "sql"}`. Requests for different adapters run in the same batch, and `/v1/models` lists them.
+Choose the adapter per request with the model name (`"model": "sql"`), or keep the base model name and pass `"vllm_xargs": {"gcmp_adapter": "sql"}`. `/v1/models` lists the adapters. All of them stay on the GPU, so no slot setting needs tuning.
 
-**LoRA adapters** are served with vLLM's standard flags:
+**Swapping a tenant without a restart:** start vLLM with `VLLM_SERVER_DEV_MODE=1 PYTHONPATH=training` and `--worker-extension-cls gcmp_swap_ext.GCMPSwap`, then replace the adapter in an existing slot:
+
+```bash
+curl localhost:8000/collective_rpc -H 'Content-Type: application/json' \
+  -d '{"method": "gcmp_swap", "args": ["sql", "./outputs/sql-v2"]}'
+```
+
+**LoRA adapters** use vLLM's standard flags:
 
 ```bash
 vllm serve ./models/Qwen3.8-27B-CQ-4bit --quantization cq \
@@ -181,58 +459,6 @@ vllm serve ./models/Qwen3.8-27B-CQ-4bit --quantization cq --pipeline-parallel-si
 
 Qwen3.x models start in thinking mode. Pass `"chat_template_kwargs": {"enable_thinking": false}`, or start vLLM with `--reasoning-parser qwen3`.
 
-## Reproduce the results
-
-All runs use `training/examples/alpaca_train.jsonl` and `training/examples/alpaca_val.jsonl` with seed 42, 500 steps, batch 2 × gradient accumulation 4, length 512 and learning rate 2e-5.
-
-**1. Train the six adapters.** The 4-bit runs fit a 48 GB GPU; BF16 needs 80 GB.
-
-```bash
-COMMON="--data training/examples/alpaca_train.jsonl --eval-data training/examples/alpaca_val.jsonl \
-  --kernel-module cq.cq_kernels --targets q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
-  --batch-size 2 --grad-accum 4 --max-length 512 --max-steps 500 --learning-rate 2e-5 \
-  --seed 42 --eval-steps 50 --comparison-logs --benchmark --benchmark-warmup-steps 10"
-
-# CQ + LoRA r=32
-python training/train.py --model ./models/Qwen3.8-27B-CQ-4bit $COMMON \
-  --adapter lora --rank 32 --alpha 32 --lora-dropout 0 \
-  --output ./outputs/qwen38-27b-cq-r32-comparison-v4
-
-# CQ + GCMP
-python training/train.py --model ./models/Qwen3.8-27B-CQ-4bit $COMMON \
-  --adapter gcmp --gcmp-scale 1.0 \
-  --output ./outputs/qwen38-27b-cq-4bit-alpaca-gcmp-v1
-
-# NF4 + LoRA r=32 and NF4 + GCMP (Unsloth)
-NF4="--model unsloth/Qwen3.8-27B-unsloth-bnb-4bit \
-  --train-data training/examples/alpaca_train.jsonl --eval-data training/examples/alpaca_val.jsonl \
-  --max-steps 500 --max-length 512 --eval-steps 50 --save-steps 100 --seed 42 --benchmark-warmup-steps 10"
-python training/train_unsloth_nf4.py $NF4 --adapter lora --output ./outputs/qwen38-27b-unsloth-nf4-r32-v5
-python training/train_unsloth_nf4.py $NF4 --adapter gcmp --output ./outputs/qwen38-27b-unsloth-nf4-alpaca-gcmp-v1
-
-# BF16 + LoRA r=32 and BF16 + GCMP (Unsloth, 80 GB GPU)
-ROOT=$PWD bash training/run_unsloth_16bit.sh
-```
-
-**2. Evaluate.** This runs the same-formula loss, ROUGE/BLEU and the lm-evaluation-harness tasks for every case. Interrupted runs resume where they stopped.
-
-```bash
-bash training/setup_eval_machine.sh
-export ROOT=$PWD ADAPTERS=$PWD/outputs CQ_MODEL=$PWD/models/Qwen3.8-27B-CQ-4bit
-
-bash training/run_downstream.sh 4bit    # cq/nf4 × base/lora/gcmp  (48 GB GPU)
-bash training/run_downstream.sh bf16    # bf16 × base/lora/gcmp     (80 GB GPU)
-SUITE=full bash training/run_downstream.sh 4bit   # every question instead of the quick subset
-```
-
-**3. Compare.**
-
-```bash
-python training/compare_cases.py eval_downstream --output compare   # add more eval dirs if split across machines
-```
-
-`compare/compare.md` has a table per case and paired comparisons with confidence intervals and McNemar tests. [`training/DOWNSTREAM_EVAL.md`](training/DOWNSTREAM_EVAL.md) has the details.
-
 ## Models
 
 | Model | Hugging Face |
@@ -244,7 +470,7 @@ python training/compare_cases.py eval_downstream --output compare   # add more e
 
 [All models →](https://huggingface.co/thousandml)
 
-To quantize your own model, run two scripts from the repo root:
+To quantize your own model, run these from the repo root:
 
 ```bash
 # 1. Quantize (calibration-free)
@@ -258,11 +484,15 @@ python build_convert_upload.py \
   --no-upload
 ```
 
-`./models/MODEL-CQ-4bit` is then ready for `--model` in training and for `vllm serve --quantization cq`. Without `--no-upload`, step 2 also uploads the checkpoint to `--repo-id` on Hugging Face, which needs `hf auth login` first. If step 2 fails after the shards are built, for example during the upload, rerun it with `--skip-convert` so it doesn't rebuild them.
+The folder is then ready for `--model` in training and for `vllm serve --quantization cq`. Without `--no-upload`, step 2 also uploads the checkpoint to `--repo-id` (run `hf auth login` first). If step 2 fails after the shards are built, rerun it with `--skip-convert`.
 
 ## Limitations
 
-- **Parallelism:**
+- **Scope of the results:** one model (Qwen3.8-27B), one dataset (Alpaca), one seed per case. The benchmark subset detects differences of about 5 points, not 1. GCMP ran at LoRA's learning rate, with no sweep. DROP is left out because every model scored about 0.02 on it.
+- **Speed:** GCMP training takes about 2× LoRA's step time. With a single adapter, serving is about 9% slower than LoRA. The CQ trainer is slower than Unsloth, and its validation losses (about 1.28–1.29) are still a little above the NF4 and BF16 runs (about 1.24).
+- **Serving tests:** synthetic adapter copies, short prompts and 128-token outputs, on an A40. Long contexts would put more weight on the KV cache.
+- **Tenant swaps:** a GCMP swap reuses an existing adapter slot, so adding a new name still needs a restart, and the swap hook uses vLLM's development endpoint. LoRA can register new names at runtime.
+- **Parallelism and bases:**
 
   | | 1 GPU | Pipeline parallel | Tensor parallel |
   |---|:-:|:-:|:-:|
@@ -271,9 +501,7 @@ python build_convert_upload.py \
   | vLLM serving, full-precision base + GCMP | not yet | not yet | not yet |
   | Full-precision base + GCMP in Transformers | ✓ | – | – |
 
-  CQ MoE models use TP=1 with expert parallelism.
-- **What gets adapted:** MoE expert weights and non-CQ dense layers are not adapted.
-- **Benchmark scope:** results so far are for one model (Qwen3.8-27B), one dataset (Alpaca) and one training run per case, using the quick benchmark subset, which detects differences of about 5 points rather than 1. DROP is left out because its scores were invalid (about 0.02 for every model).
+  CQ MoE models use TP=1 with expert parallelism. MoE expert weights and non-CQ dense layers are not adapted.
 - **Your workload:** measure quality, speed and memory on your own data before relying on these numbers.
 
 ## Troubleshooting
@@ -286,15 +514,14 @@ python -c "import torch, cq.cq_kernels; print('CUDA:', torch.cuda.is_available()
 - **Native binaries:** they must match your Python (3.12), CUDA and PyTorch versions.
 - **License:** set `CQ_LICENSE_KEY` / `CQ_LICENSE_URL` if your distribution needs a license.
 - **Windows line endings:** if you get a `bash\r` error, run `sed -i 's/\r$//' install.sh`.
+- **"Stale file handle" on a network disk:** don't edit a script while it's running from that disk. Run a copy from `/tmp`.
 
 ## Citation
-
-If you use Training Factory, CQ or GCMP in your work, please cite:
 
 ```bibtex
 @software{elfadil2026trainingfactory,
   author       = {Elfadil, Husam},
-  title        = {Training Factory: Fine-Tuning on CQ 4-bit Models with GCMP Adapters},
+  title        = {Training Factory: Fine-Tuning with GCMP Adapters on Full-Precision and CQ 4-bit Models},
   organization = {ThousandML},
   year         = {2026},
   url          = {https://github.com/thousandml/training-factory}
@@ -303,6 +530,6 @@ If you use Training Factory, CQ or GCMP in your work, please cite:
 
 ## Contributing
 
-Bug reports, hardware measurements, model-compatibility reports and independent benchmark runs are welcome. Open an [issue](https://github.com/thousandml/training-factory/issues).
+Bug reports, hardware measurements, model-compatibility reports and independent benchmark runs are welcome. Please open an [issue](https://github.com/thousandml/training-factory/issues).
 
 **ThousandML: Making Every Bit Count.**

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Unsloth 16-bit (bf16) base: LoRA r=32 vs GCMP, same settings as the NF4 runs.
+# Unsloth 16-bit (bf16) base: LoRA r=32, LoRA r=8, VeRA and GCMP, same settings as the NF4 runs.
 #
-#   bash run_unsloth_16bit.sh            # both
-#   bash run_unsloth_16bit.sh gcmp       # one
+#   bash run_unsloth_16bit.sh                    # all four
+#   bash run_unsloth_16bit.sh gcmp lora8         # selected ones
 #
 # Needs a GPU with >= 80 GB: the 27B base alone is ~54 GB in bf16.
 set -euo pipefail
@@ -46,17 +46,21 @@ run() {
     return 1
   fi
   mkdir -p "$out"
-  echo "== $which -> $out"
-  python "training/train_unsloth_16bit_$which.py" "${COMMON[@]}" --output "$out" "$@" 2>&1 | tee "$out/train.log"
+  echo "== ${which:-vera} -> $out"
+  python "training/train_unsloth_16bit${which:+_$which}.py" "${COMMON[@]}" --output "$out" "$@" 2>&1 | tee "$out/train.log"
 }
 
-CASES=("${@:-lora gcmp}")
+CASES=("${@:-lora lora8 vera gcmp}")
 for c in ${CASES[*]}; do
   case $c in
     lora) run lora ./outputs/qwen38-27b-unsloth-bf16-r32-v1 \
             --lora-rank 32 --lora-alpha 32 --lora-dropout 0.0 ;;
+    lora8) run lora ./outputs/qwen38-27b-unsloth-bf16-r8-v1 \
+            --lora-rank 8 --lora-alpha ${LORA8_ALPHA:-8} --lora-dropout 0.0 ;;
+    vera) run "" ./outputs/qwen38-27b-unsloth-bf16-vera-v1 --adapter vera \
+            --vera-rank 256 --vera-d-initial 0.1 --learning-rate ${VERA_LR:?set VERA_LR (see comparison_config.json of the VeRA run)} ;;
     gcmp) run gcmp ./outputs/qwen38-27b-unsloth-bf16-alpaca-gcmp-v1 \
             --gcmp-scale 1.0 --kernel-module cq.cq_kernels ;;
-    *) echo "unknown case $c (lora | gcmp)" >&2; exit 2 ;;
+    *) echo "unknown case $c (lora | lora8 | vera | gcmp)" >&2; exit 2 ;;
   esac
 done

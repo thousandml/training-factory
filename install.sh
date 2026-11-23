@@ -155,6 +155,7 @@ python -m pip install unsloth --no-deps
 # model patching is NOT enabled: it can replace CQ quantized projections.
 # Do not allow the resolver to replace the CUDA 13 PyTorch stack.
 python -m pip install "unsloth-zoo==2026.10.7" --no-deps
+python -m pip install hf_transfer
 
 # Install Zoo's declared auxiliary dependencies without allowing their resolver
 # to replace CQ's CUDA-enabled torch/triton or pinned Transformers stack.

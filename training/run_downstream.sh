@@ -2,7 +2,7 @@
 # Full downstream evaluation for every base/adapter combination.
 #
 #   bash run_downstream.sh 4bit                 # 40 GB machine: CQ + NF4, base/LoRA/GCMP
-#   bash run_downstream.sh bf16                 # 80 GB machine: BF16, base/LoRA/GCMP
+#   bash run_downstream.sh bf16                 # 80 GB machine: BF16, base/LoRA r=32/LoRA r=8/VeRA/GCMP
 #   bash run_downstream.sh 4bit cq_gcmp nf4_lora   # selected cases only
 #   STAGES="loss tasks" SUITE=full bash run_downstream.sh 4bit
 #
@@ -27,12 +27,13 @@ NF4_MODEL=${NF4_MODEL:-unsloth/Qwen3.8-27B-unsloth-bnb-4bit}
 BF16_MODEL=${BF16_MODEL:-Qwen/Qwen3.8-27B}
 
 ADAPTERS=${ADAPTERS:-/workspace/adapters}                    # copy the adapter folders here
-CQ_LORA=${CQ_LORA:-$ADAPTERS/qwen38-27b-cq-r32-comparison-v4}
-CQ_GCMP=${CQ_GCMP:-$ADAPTERS/qwen38-27b-cq-4bit-alpaca-gcmp-v1}
-NF4_LORA=$ADAPTERS/qwen38-27b-unsloth-nf4-r32-v5/final_adapter
-NF4_GCMP=$ADAPTERS/qwen38-27b-unsloth-nf4-alpaca-gcmp-v1/final_adapter
-BF16_LORA=$ADAPTERS/qwen38-27b-unsloth-bf16-r32-v1/final_adapter
-BF16_GCMP=$ADAPTERS/qwen38-27b-unsloth-bf16-alpaca-gcmp-v1/final_adapter
+# Adapter folders. Defaults are the output names used in the README; override any of them.
+CQ_LORA=${CQ_LORA:-$ADAPTERS/qwen38-27b-cq-r32-v8-fix}
+CQ_GCMP=${CQ_GCMP:-$ADAPTERS/qwen38-27b-cq-gcmp-v2-fix}
+NF4_LORA=${NF4_LORA:-$ADAPTERS/qwen38-27b-unsloth-nf4-r32-v5/final_adapter}
+NF4_GCMP=${NF4_GCMP:-$ADAPTERS/qwen38-27b-unsloth-nf4-alpaca-gcmp-v1/final_adapter}
+BF16_LORA=${BF16_LORA:-$ADAPTERS/qwen38-27b-unsloth-bf16-r32-v1/final_adapter}
+BF16_GCMP=${BF16_GCMP:-$ADAPTERS/qwen38-27b-unsloth-bf16-alpaca-gcmp-v1/final_adapter}
 BF16_LORA8=${BF16_LORA8:-$ADAPTERS/qwen38-27b-unsloth-bf16-r8-v1/final_adapter}
 BF16_VERA=${BF16_VERA:-$ADAPTERS/qwen38-27b-unsloth-bf16-vera-v1/final_adapter}
 
@@ -54,7 +55,7 @@ declare -A CASE=(
 )
 case ${1:-} in
   4bit) ORDER=(cq_base cq_lora cq_gcmp nf4_base nf4_lora nf4_gcmp) ;;
-  bf16) ORDER=(bf16_base bf16_lora bf16_gcmp) ;;
+  bf16) ORDER=(bf16_base bf16_lora bf16_lora_r8 bf16_vera bf16_gcmp) ;;
   *) echo "usage: $0 4bit|bf16 [case ...]" >&2; exit 2 ;;
 esac
 shift
@@ -73,6 +74,8 @@ for name in "${ORDER[@]}"; do
   out=$EVAL_DIR/$name
   mkdir -p "$out"
   log=$out/run.log
+  if [[ -n $adapter && ! -e $adapter ]]; then echo "!! $name: adapter not found: $adapter" >&2; failed+=("$name"); continue; fi
+  echo "== $name  base=$model  adapter=${adapter:-none}" | tee -a "$log"
   if [[ -n $adapter && ! -f $adapter/adapter_config.json ]]; then
     echo "!! $name: no adapter_config.json in $adapter" | tee -a "$log" >&2
     failed+=("$name"); continue
