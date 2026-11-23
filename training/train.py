@@ -26,6 +26,8 @@ def main():
                    help='gcmp: CQ GCMP adapter (default, LoRA replacement); lora: PEFT LoRA')
     p.add_argument('--gcmp-scale', type=float, default=1.0,
                    help='GCMP output scale: y = W x + scale * dW x')
+    p.add_argument('--save-dtype', choices=['bf16', 'fp32'], default='bf16',
+                   help='GCMP: dtype of the final adapter file (training checkpoints stay fp32)')
     p.add_argument('--rank', type=int, default=16)
     p.add_argument('--alpha', type=int, default=32)
     p.add_argument('--max-length', type=int, default=1024)
@@ -273,7 +275,7 @@ def main():
         instrument_trainer(trainer, benchmark_callback)
     result = trainer.train(resume_from_checkpoint=a.resume)
     if a.adapter == 'gcmp':
-        gcmp.save_adapter(model, a.output, base_model_path)
+        gcmp.save_adapter(model, a.output, base_model_path, dtype={'bf16': torch.bfloat16, 'fp32': torch.float32}[a.save_dtype])
     else:
         model.save_pretrained(a.output, safe_serialization=True)
     tokenizer.save_pretrained(a.output)

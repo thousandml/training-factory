@@ -76,6 +76,8 @@ def parse_args(argv=None, adapter=None):
     p.add_argument('--vera-d-initial', type=float, default=0.1)
     # GCMP
     p.add_argument('--gcmp-scale', type=float, default=1.0)
+    p.add_argument('--save-dtype', choices=['bf16', 'fp32'], default='bf16',
+                   help='GCMP: dtype of the final adapter file (training checkpoints stay fp32)')
     p.add_argument('--kernel-module', default='cq.cq_kernels',
                    help='GCMP: extension with my_qlinear::gcmp_* (torch fallback if absent)')
     p.add_argument('--unsloth-compile-disable', action='store_true',
@@ -214,6 +216,8 @@ def main(argv=None, adapter=None):
     trainer.train()
     final = os.path.join(a.output, 'final_adapter')
     trainer.save_model(final)
+    if a.adapter == 'gcmp':     # final file in --save-dtype; checkpoints stay fp32
+        gcmp.save_adapter(trainer.model, final, a.model, dtype={'bf16': torch.bfloat16, 'fp32': torch.float32}[a.save_dtype])
     tokenizer.save_pretrained(final)
     print(f'Adapter ({a.adapter}) saved to {final}')
 

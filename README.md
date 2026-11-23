@@ -23,7 +23,7 @@ Training Factory fine-tunes open LLMs on your own GPUs. It has three parts:
 | Swap one tenant for a new one, p50 | **0.43 s** | – | 5.4 s |
 | p99 time to first token, 256 tenants, long-tail traffic | **1.2 s** | – | 91 s |
 
-¹ The 14–55× is trainable parameters. GCMP adapters are saved in fp32 and LoRA in bf16, so the on-disk ratio vs LoRA r=32 is ~27×; at the same dtype it's 55× (~5.8 MB vs ~320 MB). To store a GCMP adapter in bf16, run `python training/to_bf16.py <adapter_dir> <output_dir>`. The loaders read bf16 files as-is. An accuracy check of bf16-stored adapters is in progress.
+¹ The 14–55× is trainable parameters. GCMP adapters are saved in fp32 and LoRA in bf16, so the on-disk ratio vs LoRA r=32 is ~27×; at the same dtype it's 55× (~5.8 MB vs ~320 MB). New adapters are saved in bf16 by default (`--save-dtype`); to convert an older fp32 adapter, run `python training/to_bf16.py <adapter_dir> <output_dir>`. The loaders read bf16 files as-is. An accuracy check of bf16-stored adapters is in progress.
 
 Each row is explained, with significance tests, in [Results](#results). [Reproduce the benchmarks](#reproduce-the-benchmarks) has every command.
 
@@ -415,6 +415,7 @@ Training data is JSONL, with either plain text or chat messages:
 | `--targets` | all attention + MLP projections | comma-separated projection names |
 | `--rank`, `--alpha`, `--lora-dropout` | 16, 32, 0.05 | LoRA only |
 | `--gcmp-scale` | 1.0 | GCMP output scale |
+| `--save-dtype` | `bf16` | GCMP: dtype of the final adapter file (`bf16` or `fp32`). Checkpoints stay fp32, so `--resume` is exact. Also in the Unsloth scripts |
 | `--learning-rate` | 2e-4 | the benchmarks used 2e-5 |
 | `--batch-size`, `--grad-accum` | | effective batch = product |
 | `--max-length`, `--max-steps` / `--epochs` | | |
