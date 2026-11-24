@@ -19,7 +19,8 @@ Training Factory fine-tunes open LLMs on your own GPUs. It has three parts:
 | BF16 base: benchmark accuracy | tied | tied | tied |
 | BF16 base: held-out answer loss ↓ | **1.471** | 1.480 | 1.555 |
 | NF4 base: GSM8K | **83.3** | 79.3 | – |
-| 256 adapters on one A40: output tok/s | **~84** (same as 1 adapter) | can't start (host RAM) | 59.5 default, 74.4 tuned |
+| 256 adapters on one A40 (CQ base): output tok/s | **~84** (same as 1 adapter) | can't start (host RAM) | 59.5 default, 74.4 tuned |
+| 256 adapters on one 80 GB GPU (BF16 base): output tok/s | **665** | – | 329 default, 441 tuned |
 | Swap one tenant for a new one, p50 | **0.43 s** | – | 5.4 s |
 | p99 time to first token, 256 tenants, long-tail traffic | **1.2 s** | – | 91 s |
 
@@ -165,6 +166,31 @@ The setup is one A40 48 GB, vLLM, the CQ base and 32 concurrent requests. Every 
 - **LoRA r=32** can't run 32 slots on a 48 GB GPU. With 256 adapters it needs about 82 GB of host RAM, because vLLM keeps every registered adapter in CPU memory; 256 GCMP adapters take about 1.5 GB in bf16 (3 GB in fp32).
 - **Startup:** vLLM registers LoRA adapters one at a time, about 6 s each at r=8 and about 18 s at r=32.
 - **With a single adapter,** LoRA is about 9% faster than GCMP (91 vs 83 tok/s).
+
+### 3b. Serving many adapters on a full-precision base
+
+The same test on the original BF16 Qwen3.8-27B, no quantization: one 80 GB GPU, vLLM, 32 concurrent requests to random adapters, 128 output tokens, `--max-num-batched-tokens 4096`. GCMP and LoRA adapters were both stored in bf16.
+
+| Adapters | GCMP tok/s | LoRA r=8, default (16 slots) | LoRA r=8, 32 slots | LoRA r=8, 64 slots |
+|---:|---:|---:|---:|---:|
+| 1 | 586¹ | **864** | – | – |
+| 16 | 668 | 680 | – | – |
+| 64 | **693** | 414 | – | – |
+| 256 | **665** | 329 | 428 | 441 |
+
+| At 256 adapters | GCMP | LoRA r=8, default | LoRA r=8, 64 slots |
+|---|---:|---:|---:|
+| TTFT p95 | **0.60 s** | 7.8 s | 1.32 s |
+| Latency p95 | **6.3 s** | 14.2 s | 9.7 s |
+| KV cache (tokens) | **111,274** | 134,485 | 77,141 |
+| Ready to serve | **~5 min** | ~18 min | ~8 min² |
+
+- **GCMP stays flat from 16 to 256 adapters** (665–693 tok/s) with no tuning. Default multi-LoRA loses 52% over the same range.
+- **At 256 adapters GCMP is 2.0× default LoRA and 1.5× the best-tuned LoRA**, and tuned LoRA leaves 31% less KV cache (77k vs 111k tokens). The gap is larger than on the CQ base, where tuned LoRA came within 12%.
+- **With one adapter LoRA is faster** (864 vs about 670 tok/s), and GCMP costs about 35% against the bare BF16 model (1,041 tok/s). On a fast base, GCMP's per-layer serving path is a larger share of each step; optimizing it is in progress.
+- GCMP's KV cache shrinks slowly as adapters are added (139k at 16, 111k at 256) because each adapter's GPU copy is kept in fp32.
+
+¹ First server of the run; its warm-up shows in a 7.7 s TTFT p95, the same spike the bare base had. ² Later runs reused vLLM's compile cache, so startup times are only roughly comparable.
 
 ### 4. Tenant turnover over 45 minutes
 
@@ -384,6 +410,18 @@ CONFIGS="gcmp lora8" NS="64 256" bash training/run_adapter_scaling.sh   # a subs
 
 The script sweeps vLLM's `--max-loras` (GPU slots) at the largest adapter count: `SWEEP8="32 64"` for r=8 and `SWEEP32="32"` for r=32. The results go to `scaling/results/summary.md` (tok/s, latency, TTFT and KV cache size), with one JSON per case and the server log next to each. Registering 256 LoRA adapters can take 30–40 minutes, so the script waits up to 90 minutes for the server (`WAIT_TRIES`, in 10-second steps).
 
+**Full-precision base (section 3b),** on an 80 GB GPU: set `BASE=bf16`, which drops `--quantization cq`, and cap the prefill batch. Use adapters trained on that model (the Unsloth 16-bit runs from step 2), converted to bf16 first:
+
+```bash
+for src in outputs/qwen38-27b-unsloth-bf16-alpaca-gcmp-v1/final_adapter outputs/qwen38-27b-unsloth-bf16-r32-v1/final_adapter; do
+  dst="${src%/final_adapter}-bf16store"; cp -r "$src" "$dst"; python training/to_bf16.py "$src" "$dst"
+done
+export BASE=bf16 MAX_BATCHED=4096 MODEL=Qwen/Qwen3.8-27B WORK=$PWD/scaling_bf16
+export GCMP_SRC=$PWD/outputs/qwen38-27b-unsloth-bf16-alpaca-gcmp-v1-bf16store
+export LORA_SRC=$PWD/outputs/qwen38-27b-unsloth-bf16-r32-v1-bf16store
+CONFIGS="base gcmp lora8" bash training/run_adapter_scaling.sh
+```
+
 **Host RAM:** 256 LoRA r=32 adapters need about 82 GB of host RAM. On a pod with a lower memory limit (`cat /sys/fs/cgroup/memory.max`), that case stalls part way through registration.
 
 ### Step 6. Turnover benchmark
@@ -440,7 +478,7 @@ GCMP also trains on non-CQ bases through Unsloth: `training/train_unsloth_16bit_
 
 **Which base:** adapters trained on CQ (`training/train.py`) are served on the CQ model with `--quantization cq`. Adapters trained on a full-precision model (`train_unsloth_16bit_gcmp.py`) are served on that same model with no `--quantization` flag. Everything below works on both. All adapters on one server must be of the same kind; a mismatch stops the server at startup instead of silently serving the base model.
 
-**Full-precision check (Qwen3.8-27B, BF16, one 80 GB GPU):** the BF16 GCMP adapter served by vLLM lowers held-out answer loss from 1.623 to 1.436 on 200 rows, the same improvement the Transformers evaluation measured (1.678 → 1.471 on all 2,600 rows, with a slightly different loss formula). The multi-adapter speed benchmarks in [Results](#results) were run on the CQ base; full-precision speed numbers are next.
+**Full-precision check (Qwen3.8-27B, BF16, one 80 GB GPU):** the BF16 GCMP adapter served by vLLM lowers held-out answer loss from 1.623 to 1.436 on 200 rows, the same improvement the Transformers evaluation measured (1.678 → 1.471 on all 2,600 rows, with a slightly different loss formula). Multi-adapter speed on a full-precision base is in [Results, section 3b](#3b-serving-many-adapters-on-a-full-precision-base).
 
 **Memory on full-precision bases:** GCMP adds a small fp32 buffer per layer during prefill, so keep `--max-num-batched-tokens` at about 4096 on a model that nearly fills the GPU (the default 16384 ran out of memory with BF16 27B on 80 GB).
 
@@ -507,7 +545,7 @@ The folder is then ready for `--model` in training and for `vllm serve --quantiz
 
 - **Scope of the results:** one model (Qwen3.8-27B), one dataset (Alpaca), one seed per case. The benchmark subset detects differences of about 5 points, not 1. GCMP ran at LoRA's learning rate, with no sweep. DROP is left out because every model scored about 0.02 on it.
 - **Speed:** GCMP training takes about 2× LoRA's step time. With a single adapter, serving is about 9% slower than LoRA. The CQ trainer is slower than Unsloth, and its validation losses (about 1.28–1.29) are still a little above the NF4 and BF16 runs (about 1.24).
-- **Serving tests:** synthetic adapter copies, short prompts and 128-token outputs, on an A40 with the CQ base. Long contexts would put more weight on the KV cache. On a full-precision base, accuracy is verified in vLLM but the multi-adapter speed benchmarks haven't been run yet.
+- **Serving tests:** synthetic adapter copies, short prompts and 128-token outputs, on an A40 with the CQ base. Long contexts would put more weight on the KV cache. The full-precision speed test (section 3b) used an 80 GB GPU with the same synthetic setup; the turnover test has only been run on CQ.
 - **Tenant swaps:** a GCMP swap reuses an existing adapter slot, so adding a new name still needs a restart, and the swap hook uses vLLM's development endpoint. LoRA can register new names at runtime.
 - **Parallelism and bases:**
 
