@@ -6,7 +6,7 @@
 
 Training Factory fine-tunes open LLMs on your own GPUs. It has three parts:
 
-- **GCMP adapters.** 2.9M trainable parameters for a 27B model, where LoRA r=32 needs ~159M. Files are ~11 MB for GCMP (fp32) vs ~320 MB for LoRA r=32 (bf16); at the same dtype GCMP is ~5.8 MB. GCMP works on full-precision (BF16/FP16) models and on 4-bit bases.
+- **GCMP adapters.** 2.9M trainable parameters for a 27B model, where LoRA r=32 needs ~159M. Adapter files are ~5.8 MB for GCMP vs ~319 MB for LoRA r=32, both in bf16 (55× smaller). GCMP works on full-precision (BF16/FP16) models and on 4-bit bases.
 - **CQ 4-bit quantization** (optional). It needs no calibration data. On Qwen3.8-27B, the CQ base matches the full-precision model on all 9 benchmarks we ran, in an 18 GB checkpoint.
 - **vLLM serving.** One base model serves many GCMP adapters, on a CQ 4-bit base or a full-precision (BF16/FP16) one. Each request picks its adapter, and requests for different adapters share a batch.
 
@@ -15,7 +15,7 @@ Training Factory fine-tunes open LLMs on your own GPUs. It has three parts:
 | | GCMP | LoRA r=32 | LoRA r=8 |
 |---|---:|---:|---:|
 | Trainable parameters | **2.9M** | ~159M | ~40M |
-| Adapter file¹ | **~11 MB** (fp32) | ~320 MB (bf16) | ~80 MB (bf16) |
+| Adapter file (bf16)¹ | **~5.8 MB** | ~319 MB | ~80 MB |
 | BF16 base: benchmark accuracy | tied | tied | tied |
 | BF16 base: held-out answer loss ↓ | **1.471** | 1.480 | 1.555 |
 | NF4 base: GSM8K | **83.3** | 79.3 | – |
@@ -23,7 +23,7 @@ Training Factory fine-tunes open LLMs on your own GPUs. It has three parts:
 | Swap one tenant for a new one, p50 | **0.43 s** | – | 5.4 s |
 | p99 time to first token, 256 tenants, long-tail traffic | **1.2 s** | – | 91 s |
 
-¹ The 14–55× is trainable parameters. GCMP adapters are saved in fp32 and LoRA in bf16, so the on-disk ratio vs LoRA r=32 is ~27×; at the same dtype it's 55× (~5.8 MB vs ~320 MB). New adapters are saved in bf16 by default (`--save-dtype`); to convert an older fp32 adapter, run `python training/to_bf16.py <adapter_dir> <output_dir>`. The loaders read bf16 files as-is. An accuracy check of bf16-stored adapters is in progress.
+¹ The 14–55× is trainable parameters; file sizes follow it at the same dtype. Our trainers saved both GCMP and the Unsloth LoRA in fp32 (11.6 MB vs ~637 MB), and both are half that in bf16 (5.8 MB vs ~319 MB). Storing GCMP in bf16 costs nothing: held-out answer loss is identical to the fp32 file on CQ (1.5033 vs 1.5033) and NF4 (1.4582 vs 1.4582). New GCMP adapters are saved in bf16 by default (`--save-dtype`); convert older fp32 ones with `python training/to_bf16.py <adapter_dir> <output_dir>`.
 
 Each row is explained, with significance tests, in [Results](#results). [Reproduce the benchmarks](#reproduce-the-benchmarks) has every command.
 
@@ -162,7 +162,7 @@ The setup is one A40 48 GB, vLLM, the CQ base and 32 concurrent requests. Every 
 
 - **GCMP throughput is flat** at about 84 output tok/s from 1 to 256 adapters, with no tuning.
 - **Default multi-LoRA** (r=8) falls to about 60 tok/s by 64 adapters. Raising it to 64 GPU slots recovers 74 tok/s, but the slots take memory up front and the KV cache drops from 88k to 43k tokens.
-- **LoRA r=32** can't run 32 slots on a 48 GB GPU. With 256 adapters it needs about 82 GB of host RAM, because vLLM keeps every registered adapter in CPU memory; 256 GCMP adapters take about 3 GB in fp32 (about 1.5 GB in bf16).
+- **LoRA r=32** can't run 32 slots on a 48 GB GPU. With 256 adapters it needs about 82 GB of host RAM, because vLLM keeps every registered adapter in CPU memory; 256 GCMP adapters take about 1.5 GB in bf16 (3 GB in fp32).
 - **Startup:** vLLM registers LoRA adapters one at a time, about 6 s each at r=8 and about 18 s at r=32.
 - **With a single adapter,** LoRA is about 9% faster than GCMP (91 vs 83 tok/s).
 
