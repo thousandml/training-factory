@@ -24,7 +24,14 @@ DURATION=${DURATION:-2700}; RATE=${RATE:-0.45}; ZIPF=${ZIPF:-1.1}; CHURN_EVERY=$
 SKEW_N=${SKEW_N:-256}; CHURN_N=${CHURN_N:-64}; INCOMING=${INCOMING:-128}
 LORA_CPU=${LORA_CPU:-64}                         # --max-cpu-loras: adapters cached in host RAM
 PORT=${PORT:-8011}
-SERVE=(--quantization cq --max-model-len 2048 --max-num-seqs 64 --gpu-memory-utilization 0.92 --port "$PORT")
+# BASE=cq (default): CQ 4-bit model with --quantization cq.
+# BASE=bf16: a full-precision model, no --quantization; GCMP/LoRA adapters must be trained on it.
+BASE=${BASE:-cq}
+MAX_BATCHED=${MAX_BATCHED:-}          # --max-num-batched-tokens; bf16 27B on 80 GB needs ~4096
+SERVE=(--max-model-len 2048 --max-num-seqs 64 --gpu-memory-utilization ${GPU_UTIL:-0.92} --port "$PORT")
+[[ $BASE == cq ]] && SERVE=(--quantization cq "${SERVE[@]}")
+[[ $BASE == bf16 ]] && SERVE+=(--limit-mm-per-prompt '{"image":0,"video":0}')
+[[ -n $MAX_BATCHED ]] && SERVE+=(--max-num-batched-tokens "$MAX_BATCHED")
 T=$ROOT/training
 OUT=${OUT:-$WORK/turnover}
 mkdir -p "$OUT"

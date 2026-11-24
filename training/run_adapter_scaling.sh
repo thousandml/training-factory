@@ -20,7 +20,14 @@ LORA_SLOTS=${LORA_SLOTS:-16}          # vLLM --max-loras: LoRA adapters resident
 SWEEP32=${SWEEP32:-"32"}; SWEEP8=${SWEEP8:-"32 64"}
 CONC=${CONC:-32}; REQS=${REQS:-384}; MAXTOK=${MAXTOK:-128}
 PORT=${PORT:-8011}
-SERVE=(--quantization cq --max-model-len 2048 --max-num-seqs 64 --gpu-memory-utilization 0.92 --port "$PORT")
+# BASE=cq (default): CQ 4-bit model with --quantization cq.
+# BASE=bf16: a full-precision model, no --quantization; GCMP/LoRA adapters must be trained on it.
+BASE=${BASE:-cq}
+MAX_BATCHED=${MAX_BATCHED:-}          # --max-num-batched-tokens; bf16 27B on 80 GB needs ~4096
+SERVE=(--max-model-len 2048 --max-num-seqs 64 --gpu-memory-utilization ${GPU_UTIL:-0.92} --port "$PORT")
+[[ $BASE == cq ]] && SERVE=(--quantization cq "${SERVE[@]}")
+[[ $BASE == bf16 ]] && SERVE+=(--limit-mm-per-prompt '{"image":0,"video":0}')
+[[ -n $MAX_BATCHED ]] && SERVE+=(--max-num-batched-tokens "$MAX_BATCHED")
 T=$ROOT/training
 mkdir -p "$WORK/results"
 
