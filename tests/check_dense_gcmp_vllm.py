@@ -21,9 +21,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--model', required=True)
     ap.add_argument('--adapter', required=True)
-    ap.add_argument('--data', required=True, help='JSONL rows with "messages" and "reference" (prepare_eval_data.py)')
+    ap.add_argument('--data', required=True, help='JSONL: instruction/input/output rows (alpaca_val_eval.jsonl) or messages/reference rows')
     ap.add_argument('--rows', type=int, default=200)
     ap.add_argument('--max-model-len', type=int, default=2048)
+    ap.add_argument('--max-num-batched-tokens', type=int, default=2048,
+                    help='keeps the profiling batch small; the default 16384 runs out of memory on 80 GB with BF16 27B')
+    ap.add_argument('--gpu-memory-utilization', type=float, default=0.90)
+    ap.add_argument('--enforce-eager', action='store_true', help='skip torch.compile / CUDA graphs (less memory, slower)')
     a = ap.parse_args()
 
     os.environ['CQ_GCMP_ADAPTERS'] = f'gcmp={a.adapter}'      # before vLLM starts its workers
@@ -34,16 +38,24 @@ def main():
     rows = [json.loads(l) for l in open(a.data, encoding='utf-8') if l.strip()][: a.rows]
     prompts, spans = [], []
     for r in rows:
-        prompt = tok.apply_chat_template(r['messages'], tokenize=False, add_generation_prompt=True,
+        if isinstance(r.get('messages'), list):                  # predictions.jsonl / chat rows
+            messages, reference = r['messages'], r['reference']
+        else:                                                     # alpaca_val_eval.jsonl rows
+            user = r['instruction'] + (f"\n\n{r['input']}" if r.get('input') else '')
+            messages, reference = [{'role': 'user', 'content': user}], r['output']
+        prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
                                          enable_thinking=False)
         p_ids = tok(prompt, add_special_tokens=False)['input_ids']
-        full = tok(prompt + r['reference'] + (tok.eos_token or ''), add_special_tokens=False)['input_ids']
+        full = tok(prompt + reference + (tok.eos_token or ''), add_special_tokens=False)['input_ids']
         if len(full) > a.max_model_len - 1 or len(full) <= len(p_ids):
             continue
         prompts.append({'prompt_token_ids': full})
         spans.append((len(p_ids), len(full)))
 
-    llm = LLM(model=a.model, max_model_len=a.max_model_len, enforce_eager=False)
+    llm = LLM(model=a.model, max_model_len=a.max_model_len, enforce_eager=a.enforce_eager,
+              max_num_batched_tokens=a.max_num_batched_tokens, max_num_seqs=32,
+              gpu_memory_utilization=a.gpu_memory_utilization,
+              limit_mm_per_prompt={'image': 0, 'video': 0})     # text only: no vision-encoder profiling
     results = {}
     for label, extra in (('base', {}), ('gcmp', {'gcmp_adapter': 'gcmp'})):
         sp = SamplingParams(max_tokens=1, prompt_logprobs=0, extra_args=extra or None)
