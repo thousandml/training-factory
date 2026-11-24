@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,22 +90,30 @@ class AdapterStore:
             )
         if int(cfg.get("format_version", 0)) != FORMAT_VERSION:
             raise RuntimeError(f"CQ-GCMP: unsupported adapter format_version {cfg.get('format_version')!r}")
-        if cfg.get("base_kind", "cq") != "cq":
+        self.kind = str(cfg.get("base_kind", "cq"))
+        if self.kind not in ("cq", "dense"):
             raise RuntimeError(
-                f"CQ-GCMP: {self.path} was trained on a non-CQ base (base_kind={cfg.get('base_kind')!r}, "
-                "e.g. Unsloth NF4); this plug-in serves adapters trained on CQ checkpoints only"
+                f"CQ-GCMP: {self.path} has base_kind={self.kind!r}; adapters must be trained entirely on a "
+                "CQ checkpoint ('cq') or entirely on a full-precision model ('dense')"
             )
         self.config = cfg
         self.scale = float(cfg.get("scale", 1.0) if scale is None else scale)
         self.tensors = load_file(str(self.path / WEIGHTS_NAME))
         self.by_record: dict[str, list[AdapterEntry]] = {}
         for name, spec in cfg["modules"].items():
-            if spec.get("cq_record") is None:
-                raise RuntimeError(f"CQ-GCMP: adapter module {name!r} has no cq_record (not trained on a CQ checkpoint)")
+            if self.kind == "cq":
+                if spec.get("cq_record") is None:
+                    raise RuntimeError(f"CQ-GCMP: adapter module {name!r} has no cq_record (not trained on a CQ checkpoint)")
+                record = str(spec["cq_record"])
+            else:
+                record = dense_record(name)
+                if record is None:
+                    raise RuntimeError(f"CQ-GCMP: cannot map adapter module {name!r} to a decoder layer "
+                                       "(expected a name containing 'layers.<i>.')")
             entry = AdapterEntry(
                 module=name,
                 key=spec["key"],
-                record=str(spec["cq_record"]),
+                record=record,
                 row_start=int(spec["row_start"]),
                 row_end=int(spec["row_end"]),
                 in_features=int(spec["in_features"]),
@@ -125,6 +134,8 @@ class AdapterStore:
                     raise RuntimeError(f"CQ-GCMP: overlapping adapters {a.module!r} and {b.module!r}")
 
     def validate_against_manifest(self, manifest) -> None:
+        if self.kind != "cq":
+            return
         known = getattr(manifest, "quantized_layers", None)
         if known is None:
             return
@@ -137,6 +148,20 @@ class AdapterStore:
 
     def coefficient(self, entry: AdapterEntry) -> torch.Tensor:
         return self.tensors[entry.key].float() * self.scale
+
+
+_LAYER_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.(.+)$")
+
+
+def dense_record(module_name: str) -> str | None:
+    """Canonical key for a full-precision projection, shared by HF and vLLM names.
+
+    ``base_model.model.model.language_model.layers.3.self_attn.q_proj`` and
+    vLLM's ``language_model.model.layers.3.self_attn.q_proj`` both map to
+    ``layers.3.self_attn.q_proj``.
+    """
+    m = _LAYER_RE.search(str(module_name))
+    return f"layers.{m.group(1)}.{m.group(2)}" if m else None
 
 
 def _resolve_adapter_path(path) -> Path:
@@ -220,6 +245,13 @@ class AdapterRegistry:
         self.names = [n for n, _ in specs]
         self.paths = {n: p for n, p in specs}
         self.stores = [AdapterStore(p, float(scale) if scale else None) for _, p in specs]
+        kinds = {st.kind for st in self.stores}
+        if len(kinds) != 1:
+            raise RuntimeError(
+                "CQ-GCMP: adapters served together must all target the same kind of base "
+                f"(got {sorted(kinds)}): CQ-trained adapters need a CQ model, dense-trained adapters a "
+                "full-precision model")
+        self.kind = kinds.pop()
         if manifest is not None:
             for st in self.stores:
                 st.validate_against_manifest(manifest)
@@ -323,7 +355,8 @@ def _slot_buffer(device) -> torch.Tensor:
 
 
 @torch.no_grad()
-def attach(layer: torch.nn.Module, method, slots, input_size: int, output_size: int, device) -> None:
+def attach(layer: torch.nn.Module, method, slots, input_size: int, output_size: int, device,
+           kind: str = "cq") -> None:
     """Attach adapter coefficients to a CQ layer after its weights are loaded.
 
     ``slots`` lists ``(cq_record, output_offset, record_rows)`` for each CQ
@@ -332,7 +365,7 @@ def attach(layer: torch.nn.Module, method, slots, input_size: int, output_size: 
     global _attached
     method._cq_gcmp_plan = None
     reg = active_registry()
-    if reg is None:
+    if reg is None or reg.kind != kind:
         return
     layout = _resolve_layout(reg, slots, input_size)
     if not layout:
@@ -543,6 +576,8 @@ def swap_adapter(model: torch.nn.Module, path=None, scale: float | None = None, 
     """In-place swap (or unplug with path=None) on an already-attached model."""
     store = None if path is None else AdapterStore(path, scale)
     reg = _registry
+    if store is not None and reg is not None and store.kind != reg.kind:
+        raise ValueError(f"CQ-GCMP: cannot swap a {store.kind!r} adapter into a server attached for {reg.kind!r} adapters")
     slot = None
     if reg is not None and reg.multi:
         if name is None:

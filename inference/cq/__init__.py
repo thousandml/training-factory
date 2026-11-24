@@ -53,6 +53,13 @@ def register() -> None:
         print("[CQ-GCMP] multi-adapter routing setup failed:", repr(exc), flush=True)
         raise
     try:
+        # GCMP adapters on full-precision models (no --quantization cq); no-op without adapters
+        from . import gcmp_dense as _gcmp_dense
+        _gcmp_dense.install()
+    except Exception as exc:
+        print("[CQ-GCMP] full-precision adapter support setup failed:", repr(exc), flush=True)
+        raise
+    try:
         configure_cq_pipeline_partition()
     except Exception as exc:
         # Auto partitioning is an optimization; configuration gets another
