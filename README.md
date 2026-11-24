@@ -119,24 +119,25 @@ On the BF16 base, GCMP, LoRA r=32, LoRA r=8 and VeRA are tied on all 9 benchmark
 
 ### 2. GCMP on 4-bit bases
 
-| Benchmark | NF4 base | NF4 + LoRA r=32 | **NF4 + GCMP** | CQ base | **CQ + GCMP** |
-|---|---:|---:|---:|---:|---:|
-| GSM8K | 56.3 | 79.3 | **83.3** | 65.0 | 82.7 |
-| IFEval | 82.5 | 83.5 | 84.0 | 82.0 | 79.0 |
-| SQuAD completion | 71.6 | 74.8 | 75.6 | 74.6 | 75.6 |
-| ARC-Challenge | 58.2 | 60.8 | 61.8 | 59.8 | 62.0 |
-| HellaSwag | 73.6 | 73.4 | 73.3 | 73.5 | 73.1 |
-| WinoGrande | 77.0 | 76.6 | 76.8 | 78.0 | 77.2 |
-| BoolQ | 85.2 | 88.0 | 87.8 | 88.0 | 90.4 |
-| MMLU | 83.9 | 84.0 | 83.7 | 84.0 | 84.0 |
-| TruthfulQA MC2 | 55.0 | 52.8 | 52.2 | 53.7 | 52.7 |
-| Answer loss ↓ | 1.654 | 1.464 | **1.458** | 1.669 | 1.503 |
+| Benchmark | NF4 base | NF4 + LoRA r=32 | **NF4 + GCMP** | CQ base | CQ + LoRA r=32 | **CQ + GCMP** |
+|---|---:|---:|---:|---:|---:|---:|
+| GSM8K | 56.3 | 79.3 | **83.3** | 65.0 | 58.7 | 82.7 |
+| IFEval | 82.5 | 83.5 | 84.0 | 82.0 | 78.5 | 79.0 |
+| SQuAD completion | 71.6 | 74.8 | 75.6 | 74.6 | 71.4 | 75.6 |
+| ARC-Challenge | 58.2 | 60.8 | 61.8 | 59.8 | 62.2 | 62.0 |
+| HellaSwag | 73.6 | 73.4 | 73.3 | 73.5 | 72.0 | 73.1 |
+| WinoGrande | 77.0 | 76.6 | 76.8 | 78.0 | 78.6 | 77.2 |
+| BoolQ | 85.2 | 88.0 | 87.8 | 88.0 | 90.2 | 90.4 |
+| MMLU | 83.9 | 84.0 | 83.7 | 84.0 | 83.2 | 84.0 |
+| TruthfulQA MC2 | 55.0 | 52.8 | 52.2 | 53.7 | 53.3 | 52.7 |
+| Answer loss ↓ | 1.654 | 1.464 | **1.458** | 1.669 | 1.517 | 1.503 |
 
 - **NF4 base, GCMP vs LoRA r=32:** GCMP is 4.0 points higher on GSM8K (p = 0.043), and the two are tied everywhere else (p ≥ 0.36). GCMP also has the lower answer and validation loss.
 - **CQ + GCMP vs the CQ base:** GSM8K +17.7 (p = 6e-10).
 - **CQ + GCMP vs NF4 + GCMP:** tied on GSM8K (82.7 vs 83.3, p = 0.89). CQ is 2.6 points higher on BoolQ (p = 0.015) and 5.0 points lower on IFEval (p = 0.053, borderline). These two use different trainers, so this compares the full stacks, not only the base formats.
 - **4-bit vs full precision after GCMP:** NF4 + GCMP and CQ + GCMP are both about 6 points below BF16 + GCMP on GSM8K (p ≈ 0.01). CQ's base-model lead over NF4 does not carry over after fine-tuning in this test.
-- **CQ + LoRA:** an earlier trainer version produced a broken adapter, so no result is reported here yet. A retrained adapter from the current trainer is being evaluated now.
+- **CQ + GCMP vs CQ + LoRA r=32 (same trainer and settings):** GCMP is 24.0 points higher on GSM8K (p = 2e-14) and 4.2 higher on SQuAD (p = 0.005), and tied on the other benchmarks. Its answer loss is also lower (−0.013, CI excludes 0).
+- **Read the CQ + LoRA result with care:** CQ + LoRA scores *below* the CQ base on GSM8K (58.7 vs 65.0, p = 0.056), while NF4 + LoRA with the same settings reaches 79.3. Its validation loss also rose during training (1.29 → 1.36). Both point to a remaining problem in the CQ trainer's LoRA path rather than to LoRA itself, so we don't claim GCMP beats LoRA by 24 points in general. GCMP on CQ works out of the box; we're investigating the LoRA path.
 
 ### 3. Serving many adapters on one GPU
 
