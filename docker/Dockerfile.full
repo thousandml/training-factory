@@ -1,0 +1,36 @@
+# ThousandML full image: CQ inference (vLLM plugin) + Training Factory (CQ trainer,
+# GCMP, Unsloth path). Used by `thousandml train` and `thousandml serve`.
+#
+# Build from the repo root, with Git LFS binaries pulled:
+#   git lfs pull
+#   docker build -f docker/Dockerfile.full -t thousandml/training-factory:latest .
+#   docker push thousandml/training-factory:latest
+FROM vllm/vllm-openai:v0.28.0-ubuntu2404
+
+ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 HF_HUB_ENABLE_HF_TRANSFER=1
+RUN apt-get update && apt-get install -y --no-install-recommends git git-lfs curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# The vLLM image only ships `python3`; install.sh and the CLI's job scripts call `python`/`pip`.
+RUN ln -sf "$(command -v python3)" /usr/local/bin/python && \
+    (command -v pip >/dev/null || { printf '#!/bin/sh\nexec python3 -m pip "$@"\n' > /usr/local/bin/pip && \
+     chmod +x /usr/local/bin/pip; }) && python --version && pip --version
+
+# Whole repo, including .git so install.sh's `git lfs pull` is a no-op on pulled files.
+COPY . /opt/training-factory
+WORKDIR /opt/training-factory
+
+# Same steps as a user install (protected binaries, CQ inference, training stack).
+RUN git config --global --add safe.directory /opt/training-factory && git lfs update --force && python -m pip install hf_transfer && bash install.sh && hf --version
+
+# Fail the build if anything the CLI relies on is missing (same checks as the
+# inference Dockerfile, plus the training stack; unsloth needs a GPU to import).
+# Written without a heredoc so it also works with Docker's legacy builder.
+RUN python -c "import torch, vllm, cq, cq.runtime_ops, cq.cq_kernels, cq.gcmp_dense, peft, trl; \
+from vllm.model_executor.layers.quantization import get_quantization_config as g; \
+print('vLLM', vllm.__version__, '| torch', torch.__version__, '| CQ:', g('cq')); \
+print('GCMP multi-adapter op:', hasattr(torch.ops.my_qlinear, 'gcmp_delta_multi'))"
+
+# The vLLM base image's entrypoint starts a server; SkyPilot runs its own commands.
+ENTRYPOINT []
+CMD ["bash"]
