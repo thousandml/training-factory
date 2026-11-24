@@ -8,7 +8,7 @@ Training Factory fine-tunes open LLMs on your own GPUs. It has three parts:
 
 - **GCMP adapters.** 2.9M trainable parameters for a 27B model, where LoRA r=32 needs ~159M. Files are ~11 MB for GCMP (fp32) vs ~320 MB for LoRA r=32 (bf16); at the same dtype GCMP is ~5.8 MB. GCMP works on full-precision (BF16/FP16) models and on 4-bit bases.
 - **CQ 4-bit quantization** (optional). It needs no calibration data. On Qwen3.8-27B, the CQ base matches the full-precision model on all 9 benchmarks we ran, in an 18 GB checkpoint.
-- **vLLM serving.** One CQ base serves many GCMP adapters. Each request picks its adapter, and requests for different adapters share a batch.
+- **vLLM serving.** One base model serves many GCMP adapters, on a CQ 4-bit base or a full-precision (BF16/FP16) one. Each request picks its adapter, and requests for different adapters share a batch.
 
 ## GCMP at a glance (Qwen3.8-27B)
 
@@ -72,6 +72,13 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '
 python training/train_unsloth_16bit_gcmp.py \
   --model Qwen/Qwen3.8-27B --dtype bfloat16 \
   --train-data train.jsonl --output ./outputs/my-gcmp-bf16
+```
+
+Serve it with plain vLLM, no `--quantization` flag:
+
+```bash
+CQ_GCMP_ADAPTER=./outputs/my-gcmp-bf16/final_adapter \
+vllm serve Qwen/Qwen3.8-27B --max-model-len 8192 --max-num-batched-tokens 4096
 ```
 
 **On your own cloud account** (AWS, GCP, Azure, RunPod, Lambda, Kubernetes and others), the `thousandml` CLI trains and serves with one command. See [docs/CLOUD.md](docs/CLOUD.md).
@@ -425,11 +432,17 @@ Training data is JSONL, with either plain text or chat messages:
 
 Run `python training/train.py --help` for every option. Adapters are saved on their own (`adapter_config.json` and `adapter_model.safetensors`). Don't merge them into the CQ base.
 
-GCMP also trains on non-CQ bases through Unsloth: `training/train_unsloth_16bit_gcmp.py` for BF16/FP16 and `training/train_unsloth_nf4.py --adapter gcmp` for NF4. The evaluation scripts load those adapters in Transformers, for example `python training/downstream_eval.py --backend unsloth --model Qwen/Qwen3.8-27B --adapter ./outputs/my-gcmp-bf16/final_adapter --output-dir eval/my-gcmp-bf16`.
+GCMP also trains on non-CQ bases through Unsloth: `training/train_unsloth_16bit_gcmp.py` for BF16/FP16 and `training/train_unsloth_nf4.py --adapter gcmp` for NF4. vLLM serves those full-precision adapters directly (see [Serving](#serving)). The evaluation scripts also load them in Transformers, for example `python training/downstream_eval.py --backend unsloth --model Qwen/Qwen3.8-27B --adapter ./outputs/my-gcmp-bf16/final_adapter --output-dir eval/my-gcmp-bf16`.
 
 ## Serving
 
 **One adapter:** set `CQ_GCMP_ADAPTER`, as in the quick start. `CQ_GCMP_ADAPTER_SCALE` overrides the adapter's scale.
+
+**Which base:** adapters trained on CQ (`training/train.py`) are served on the CQ model with `--quantization cq`. Adapters trained on a full-precision model (`train_unsloth_16bit_gcmp.py`) are served on that same model with no `--quantization` flag. Everything below works on both. All adapters on one server must be of the same kind; a mismatch stops the server at startup instead of silently serving the base model.
+
+**Full-precision check (Qwen3.8-27B, BF16, one 80 GB GPU):** the BF16 GCMP adapter served by vLLM lowers held-out answer loss from 1.623 to 1.436 on 200 rows, the same improvement the Transformers evaluation measured (1.678 → 1.471 on all 2,600 rows, with a slightly different loss formula). The multi-adapter speed benchmarks in [Results](#results) were run on the CQ base; full-precision speed numbers are next.
+
+**Memory on full-precision bases:** GCMP adds a small fp32 buffer per layer during prefill, so keep `--max-num-batched-tokens` at about 4096 on a model that nearly fills the GPU (the default 16384 ran out of memory with BF16 27B on 80 GB).
 
 **Many adapters on one server:**
 
@@ -494,7 +507,7 @@ The folder is then ready for `--model` in training and for `vllm serve --quantiz
 
 - **Scope of the results:** one model (Qwen3.8-27B), one dataset (Alpaca), one seed per case. The benchmark subset detects differences of about 5 points, not 1. GCMP ran at LoRA's learning rate, with no sweep. DROP is left out because every model scored about 0.02 on it.
 - **Speed:** GCMP training takes about 2× LoRA's step time. With a single adapter, serving is about 9% slower than LoRA. The CQ trainer is slower than Unsloth, and its validation losses (about 1.28–1.29) are still a little above the NF4 and BF16 runs (about 1.24).
-- **Serving tests:** synthetic adapter copies, short prompts and 128-token outputs, on an A40. Long contexts would put more weight on the KV cache.
+- **Serving tests:** synthetic adapter copies, short prompts and 128-token outputs, on an A40 with the CQ base. Long contexts would put more weight on the KV cache. On a full-precision base, accuracy is verified in vLLM but the multi-adapter speed benchmarks haven't been run yet.
 - **Tenant swaps:** a GCMP swap reuses an existing adapter slot, so adding a new name still needs a restart, and the swap hook uses vLLM's development endpoint. LoRA can register new names at runtime.
 - **Parallelism and bases:**
 
@@ -502,7 +515,7 @@ The folder is then ready for `--model` in training and for `vllm serve --quantiz
   |---|:-:|:-:|:-:|
   | Training (any base) | ✓ | – | – |
   | vLLM serving, CQ base + GCMP or LoRA | ✓ | ✓ | – |
-  | vLLM serving, full-precision base + GCMP | not yet | not yet | not yet |
+  | vLLM serving, full-precision base + GCMP | ✓ | untested | – |
   | Full-precision base + GCMP in Transformers | ✓ | – | – |
 
   CQ MoE models use TP=1 with expert parallelism. MoE expert weights and non-CQ dense layers are not adapted.
