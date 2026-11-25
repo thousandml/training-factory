@@ -47,6 +47,8 @@ if gcmp and lora:
 
 cmd = ['vllm', 'serve', model_dir, '--host', '0.0.0.0', '--port', '8000',
        '--max-model-len', max_len, '--served-model-name', 'base']
+if int(os.environ.get('PP_SIZE', '1')) > 1:      # a model too big for one GPU: split its layers
+    cmd += ['--pipeline-parallel-size', os.environ['PP_SIZE']]
 if prec == 'bf16':
     # GCMP's prefill buffer: keep the batch modest on a model that nearly fills the GPU
     cmd += ['--max-num-batched-tokens', os.environ.get('MAX_BATCHED_TOKENS', '4096')]

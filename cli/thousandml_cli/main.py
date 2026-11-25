@@ -27,12 +27,14 @@ import urllib.error
 
 import yaml
 
-from . import remote_resolve
+from . import gpu_select, remote_resolve
 
 DEFAULT_IMAGE = os.environ.get('THOUSANDML_IMAGE', 'docker:thousandml/training-factory:latest')
 DEFAULT_MODEL = 'Qwen/Qwen3.8-27B'
-GPUS_4BIT = 'A100-80GB:1,H100:1,L40S:1,A40:1'     # CQ / NF4 bases
-GPUS_BF16 = 'A100-80GB:1,H100:1,H200:1'           # full precision needs about twice the memory
+# Used only when the model's size can't be read (offline, private repo without HF_TOKEN).
+# Otherwise GPUs are chosen from the checkpoint size: see gpu_select.py.
+GPUS_4BIT = 'A100-80GB:1,H100:1,L40S:1,A40:1'
+GPUS_BF16 = 'A100-80GB:1,H100:1,H200:1'
 PRECISIONS = ('auto', 'cq', 'nf4', 'bf16')
 REPO = '/opt/training-factory'                     # where the image keeps the repo
 # Sent to the job only if set in your shell. While the ThousandML license server allows
@@ -94,11 +96,25 @@ def base_task(name, a):
     if prec == 'nf4' and a.adapter_kind_hint == 'gcmp-serve':
         print('note: vLLM serves GCMP adapters on CQ and full-precision (bf16) bases; this nf4 service '
               'will serve LoRA adapters and skip GCMP ones.', file=sys.stderr)
-    gpus = a.gpus or (GPUS_BF16 if prec == 'bf16' else GPUS_4BIT)
+    pp = 1
+    if a.gpus:
+        gpus = a.gpus
+    else:
+        job = 'serve' if a.cmd == 'serve' else 'train'
+        try:
+            gpus, pp, why = gpu_select.choose(prec, ckpt, base, job)
+        except ValueError as e:
+            sys.exit(f'error: {e}')
+        if gpus is None:
+            gpus = GPUS_BF16 if prec == 'bf16' else GPUS_4BIT
+            print(f'gpus: {gpus} (default; {why})', file=sys.stderr)
+        else:
+            print(f'gpus: {gpus} ({why})', file=sys.stderr)
     task = {
         'name': name,
         'resources': {'accelerators': accelerators(gpus), 'image_id': a.image, 'disk_size': a.disk},
-        'envs': {'MODEL': ckpt, 'BASE_MODEL': base, 'PRECISION': prec, 'HF_HUB_ENABLE_HF_TRANSFER': '1'},
+        'envs': {'MODEL': ckpt, 'BASE_MODEL': base, 'PRECISION': prec, 'HF_HUB_ENABLE_HF_TRANSFER': '1',
+                 'PP_SIZE': str(pp)},
     }
     secrets = {k: None for k in SECRET_ENVS if os.environ.get(k)}   # values come from your shell at launch
     if secrets:
@@ -228,7 +244,7 @@ def add_common(p):
                    help='base the adapter trains or serves on: cq (ThousandML 4-bit), nf4 (bitsandbytes '
                         '4-bit) or bf16 (full precision). auto = cq if a CQ checkpoint exists, else nf4')
     p.add_argument('--gpus', help='acceptable GPUs, e.g. "A100-80GB:1,A40:1" (cheapest available wins). '
-                                  f'Default: {GPUS_4BIT} for cq/nf4, {GPUS_BF16} for bf16')
+                                  'Default: chosen from the model size, the precision and the job')
     p.add_argument('--cloud', help='pin a cloud: aws, gcp, azure, runpod, lambda, kubernetes, ...')
     p.add_argument('--spot', action='store_true', help='use spot/preemptible GPUs (cheaper, may be interrupted)')
     p.add_argument('--disk', type=int, default=200, help='disk GB')
