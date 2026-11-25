@@ -32,5 +32,8 @@ print('vLLM', vllm.__version__, '| torch', torch.__version__, '| CQ:', g('cq'));
 print('GCMP multi-adapter op:', hasattr(torch.ops.my_qlinear, 'gcmp_delta_multi'))"
 
 # The vLLM base image's entrypoint starts a server; SkyPilot runs its own commands.
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server && \
+    mkdir -p /var/run/sshd && rm -rf /var/lib/apt/lists/*
 ENTRYPOINT []
-CMD ["bash"]
+# Stay up (RunPod) and accept SSH (SkyPilot). SkyPilot's own start command still overrides this when it sets one.
+CMD ["bash", "-c", "mkdir -p ~/.ssh && [ -n \"$PUBLIC_KEY\" ] && echo \"$PUBLIC_KEY\" >> ~/.ssh/authorized_keys; service ssh start; sleep infinity"]
