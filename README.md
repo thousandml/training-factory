@@ -574,8 +574,8 @@ python -c "import torch, cq.cq_kernels; print('CUDA:', torch.cuda.is_available()
 ## Citation
 
 ```bibtex
-@software{elfadil2026trainingfactory,
-  author       = {Elfadil, Husam},
+@software{thousandml2026trainingfactory,
+  author       = {{ThousandML}},
   title        = {Training Factory: Fine-Tuning with GCMP Adapters on Full-Precision and CQ 4-bit Models},
   organization = {ThousandML},
   year         = {2026},

@@ -1,26 +1,26 @@
-CQ SOFTWARE LICENSE
+THOUSANDML SOFTWARE LICENSE
 
-Version 2.0 — Effective October 29, 2026
+Version 2.1 — Effective November 26, 2026
 
-Copyright (c) 2026 Husam Elfadil, doing business as ThousandML. All rights reserved.
+Copyright (c) 2026 ThousandML. All rights reserved.
 
-This license governs use of the CQ quantization software, CQ runtime software, Training Factory, compiled native extensions, and associated source code and documentation distributed with this repository (collectively, the "Software").
+This license governs use of the CQ quantization software, CQ runtime software, GCMP adapter software, Training Factory, the thousandml command-line tool, compiled native extensions, and associated source code and documentation distributed with this repository (collectively, the "Software").
 
 1. DEFINITIONS
 
-"ThousandML" means Husam Elfadil, doing business as ThousandML, and any successor entity to which the Software and this license are assigned, including any limited liability company or corporation formed to operate the ThousandML business.
+"ThousandML" means the owner and operator of the ThousandML business, and any successor entity to which the Software and this license are assigned, including any limited liability company or corporation formed to operate the ThousandML business.
 
 (a) "Non-Commercial Use" means use of the Software for personal projects, academic or non-profit research, or internal evaluation of the Software, in each case where neither the Software nor any output of the Software is used to provide a product or service to customers or users, or to support revenue-generating business operations.
 
 (b) "Commercial Use" means any use of the Software that is not Non-Commercial Use, including without limitation:
 
-  (i) quantizing, fine-tuning, or training models for use in a product, service, or business operation;
+  (i) quantizing, fine-tuning, or training models or adapters, including GCMP adapters, for use in a product, service, or business operation;
 
-  (ii) running, serving, or performing inference with any CQ-quantized model, any adapter trained on a CQ-quantized model, or any model that depends on CQ runtime components, in a production, customer-facing, or internal business setting; and
+  (ii) running, serving, or performing inference with any CQ-quantized model, any GCMP adapter, any adapter trained on a CQ-quantized model, or any model that depends on CQ or GCMP runtime components, in a production, customer-facing, or internal business setting; and
 
   (iii) providing the Software, or access to its functionality, to third parties.
 
-(c) "Licensed GPU" means a single physical GPU, or a single virtual GPU instance, on which any compiled CQ component executes. Each GPU on a multi-GPU card, server, or cluster counts as a separate Licensed GPU.
+(c) "Licensed GPU" means a single physical GPU, or a single virtual GPU instance, on which any compiled CQ or GCMP component executes. Each GPU on a multi-GPU card, server, or cluster counts as a separate Licensed GPU.
 
 (d) "Subscription" means a paid entitlement purchased from ThousandML that authorizes Commercial Use on a stated number of Licensed GPUs for a stated term.
 
@@ -34,7 +34,7 @@ Subject to the terms of this license, you are granted a limited, non-exclusive, 
 
 (b) use the Software to quantize machine learning models into the CQ format for Non-Commercial Use;
 
-(c) fine-tune and run CQ-quantized models with authorized CQ runtime software for Non-Commercial Use; and
+(c) fine-tune and run CQ-quantized models and GCMP adapters with authorized runtime software for Non-Commercial Use; and
 
 (d) modify the Python source code included with the Software for your own internal use.
 
@@ -68,17 +68,17 @@ You must not share License Keys outside your organization, or use a License Key 
 
 6. PROPRIETARY COMPONENTS
 
-Certain components of the Software, including CQ quantization algorithms, runtime implementations, native operators, compiled extensions, authentication mechanisms, and related implementation details, are proprietary technology of ThousandML.
+Certain components of the Software, including CQ quantization algorithms, GCMP adapter algorithms, runtime implementations, native operators, compiled extensions, authentication mechanisms, and related implementation details, are proprietary technology of ThousandML.
 
 These components may be distributed only in compiled or binary form.
 
 Except where expressly permitted by applicable law notwithstanding this restriction, you may not:
 
-(a) reverse engineer, decompile, disassemble, decode, translate, or otherwise attempt to derive the source code, algorithms, implementation, or internal operation of any compiled CQ component;
+(a) reverse engineer, decompile, disassemble, decode, translate, or otherwise attempt to derive the source code, algorithms, implementation, or internal operation of any compiled CQ or GCMP component;
 
 (b) circumvent, disable, bypass, modify, or interfere with any licensing, authentication, authorization, entitlement, License Key, or access-control mechanism;
 
-(c) extract, reproduce, recreate, or use proprietary CQ algorithms or implementation details to create a competing or substantially similar quantization or inference technology; or
+(c) extract, reproduce, recreate, or use proprietary CQ or GCMP algorithms or implementation details to create a competing or substantially similar quantization, adapter, fine-tuning, or inference technology; or
 
 (d) remove, obscure, or alter copyright, trademark, license, attribution, or proprietary notices contained in the Software.
 
@@ -86,13 +86,13 @@ Except where expressly permitted by applicable law notwithstanding this restrict
 
 You may not redistribute, sublicense, sell, lease, host, publish, or otherwise make the Software or its proprietary compiled components available to third parties except with prior written authorization from ThousandML.
 
-This restriction does not prevent distribution of model artifacts produced using the Software, subject to Section 8 and any applicable third-party model licenses. Any recipient who runs those artifacts with CQ runtime components for Commercial Use must hold its own Subscription.
+This restriction does not prevent distribution of model artifacts produced using the Software, subject to Section 8 and any applicable third-party model licenses. Any recipient who runs those artifacts with CQ or GCMP runtime components for Commercial Use must hold its own Subscription.
 
 8. MODELS, ADAPTERS, AND OUTPUTS
 
 ThousandML does not claim ownership of your training data, your fine-tuned adapters, or the outputs of your models.
 
-Model weights, adapters, and artifacts produced using the Software are not transferred to ThousandML merely because the Software was used to create them. Running them with CQ runtime components remains subject to Sections 2 and 3.
+Model weights, adapters, and artifacts produced using the Software are not transferred to ThousandML merely because the Software was used to create them. Running them with CQ or GCMP runtime components remains subject to Sections 2 and 3.
 
 You are responsible for ensuring that you have all rights necessary to use, modify, quantize, fine-tune, distribute, or publish the underlying model.
 
@@ -110,15 +110,15 @@ This license does not grant rights to any third-party model, dataset, trademark,
 
 9. AUTHORIZED RUNTIME
 
-CQ-quantized models and adapters trained on them depend on proprietary CQ runtime components.
+CQ-quantized models, GCMP adapters, and adapters trained on CQ-quantized models depend on proprietary CQ or GCMP runtime components.
 
-You may not modify a CQ model, runtime, integration, or related software for the purpose of bypassing authorization or enabling unauthorized execution of proprietary CQ functionality.
+You may not modify a CQ model, GCMP adapter, runtime, integration, or related software for the purpose of bypassing authorization or enabling unauthorized execution of proprietary CQ or GCMP functionality.
 
 10. NO TRANSFER OF INTELLECTUAL PROPERTY
 
 The Software is licensed, not sold.
 
-ThousandML and its licensors retain all right, title, and interest in and to the Software and proprietary CQ technology, including all associated intellectual property rights.
+ThousandML and its licensors retain all right, title, and interest in and to the Software and proprietary CQ and GCMP technology, including all associated intellectual property rights.
 
 Except for the limited rights expressly granted by this license, no rights are granted by implication, estoppel, or otherwise.
 
@@ -168,7 +168,7 @@ IF YOU PAID NOTHING FOR THE SOFTWARE, THOUSANDML'S TOTAL LIABILITY SHALL NOT EXC
 
 Your rights under this license terminate automatically if you materially violate its terms.
 
-Upon termination, you must cease using and distributing the Software and delete proprietary CQ binaries in your possession, except to the extent retention is required by applicable law.
+Upon termination, you must cease using and distributing the Software and delete proprietary CQ and GCMP binaries in your possession, except to the extent retention is required by applicable law.
 
 Sections concerning intellectual property, restrictions, warranty disclaimers, limitations of liability, and other provisions that by their nature should survive termination shall survive.
 
@@ -194,4 +194,4 @@ If you do not agree to these terms, do not use the Software.
 
 Commercial licensing: contact@thousandml.com
 
-Copyright (c) 2026 Husam Elfadil, doing business as ThousandML. All rights reserved.
+Copyright (c) 2026 ThousandML. All rights reserved.
